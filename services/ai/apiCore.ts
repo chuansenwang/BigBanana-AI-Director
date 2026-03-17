@@ -23,6 +23,8 @@ import {
 } from '../modelRegistry';
 import { fetchMediaWithCorsFallback } from '../mediaFetchService';
 import { DEFAULT_CHAT_VERIFY_MODEL, normalizeChatModelId } from '../modelIdUtils';
+import { buildAuthHeaders, providerRequiresApiKey } from '../providerAuthService';
+import { callProviderFetch } from '../modelRequestService';
 
 // ============================================
 // Script progress callback
@@ -106,12 +108,15 @@ export const resolveRequestModel = (type: 'chat' | 'image' | 'video' | 'audio', 
  * 2) registry global key
  * 3) runtime fallback key
  */
-export const checkApiKey = (type: 'chat' | 'image' | 'video' | 'audio' = 'chat', modelId?: string): string => {
+export const checkApiKey = (type: 'chat' | 'image' | 'video' | 'audio' = 'chat', modelId?: string): string | undefined => {
   const resolvedModel = resolveModel(type, modelId);
   console.log('[checkApiKey] type/model/resolved:', type, modelId, resolvedModel?.id, resolvedModel?.providerId);
 
   if (resolvedModel) {
     const provider = getProviderById(resolvedModel.providerId);
+    if (!providerRequiresApiKey(provider)) {
+      return undefined;
+    }
     const isVolcengineProvider =
       resolvedModel.providerId === 'volcengine' ||
       !!provider?.baseUrl?.toLowerCase().includes('volces.com');
@@ -147,6 +152,22 @@ export const getApiBase = (type: 'chat' | 'image' | 'video' | 'audio' = 'chat', 
   } catch {
     return DEFAULT_API_BASE;
   }
+};
+
+export const requestModelEndpoint = async (
+  type: 'chat' | 'image' | 'video' | 'audio',
+  modelId: string | undefined,
+  endpoint: string,
+  init: RequestInit = {}
+): Promise<Response> => {
+  const resolvedModel = resolveModel(type, modelId);
+  const provider = resolvedModel ? getProviderById(resolvedModel.providerId) : undefined;
+  const apiBase = getApiBase(type, modelId);
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return callProviderFetch(`${apiBase}${normalizedEndpoint}`, {
+    ...init,
+    providerId: provider?.id,
+  });
 };
 
 /** Get active chat model name for logging/default behavior */
@@ -439,7 +460,13 @@ export const parseHttpError = async (response: Response): Promise<Error> => {
 
   try {
     const errorData = await response.json();
-    errorMessage = errorData.error?.message || errorMessage;
+    errorMessage =
+      errorData?.error?.message ||
+      (typeof errorData?.error === 'string' ? errorData.error : undefined) ||
+      errorData?.message ||
+      errorData?.detail ||
+      errorData?.error_description ||
+      errorMessage;
   } catch {
     try {
       const errorText = await response.text();
@@ -463,7 +490,7 @@ export const chatCompletion = async (
   prompt: string,
   model: string = 'gpt-5.2',
   temperature: number = 0.7,
-  maxTokens: number = 8192,
+  maxTokens?: number,
   responseFormat?: 'json_object',
   timeout: number = 600000,
   abortSignal?: AbortSignal
@@ -506,16 +533,28 @@ export const chatCompletion = async (
   try {
     const apiBase = getApiBase('chat', model);
     const resolved = resolveModel('chat', model);
+    const provider = getProviderById(resolved?.providerId || '');
     const endpoint = resolved?.endpoint || '/v1/chat/completions';
+    const configuredMaxTokens = resolved?.type === 'chat' ? resolved.params?.maxTokens : undefined;
+    const effectiveMaxTokens = Number.isFinite(maxTokens) && (maxTokens as number) > 0
+      ? maxTokens
+      : (Number.isFinite(configuredMaxTokens) && (configuredMaxTokens as number) > 0 ? configuredMaxTokens : undefined);
 
     const executeRequest = async (body: any): Promise<Response> => {
-      const response = await fetch(`${apiBase}${endpoint}`, {
+      const requestBodyWithTokens = { ...body };
+      if (Number.isFinite(effectiveMaxTokens) && (effectiveMaxTokens as number) > 0) {
+        requestBodyWithTokens.max_tokens = effectiveMaxTokens;
+      } else {
+        delete requestBodyWithTokens.max_tokens;
+      }
+      const authHeaders = buildAuthHeaders(provider, apiKey);
+      const response = await requestModelEndpoint('chat', resolved?.id || model, endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          ...authHeaders,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBodyWithTokens),
         signal: controller.signal,
       });
 
@@ -606,14 +645,32 @@ export const chatCompletionStream = async (
   try {
     const apiBase = getApiBase('chat', model);
     const resolved = resolveModel('chat', model);
+    const provider = getProviderById(resolved?.providerId || '');
     const endpoint = resolved?.endpoint || '/v1/chat/completions';
 
+    if (provider?.connectionMode === 'proxy') {
+      const fallbackResult = await chatCompletion(
+        prompt,
+        model,
+        temperature,
+        undefined,
+        responseFormat,
+        timeout,
+        abortSignal
+      );
+      if (fallbackResult) {
+        onDelta?.(fallbackResult);
+      }
+      return fallbackResult;
+    }
+
     const executeRequest = async (body: any): Promise<Response> => {
-      const response = await fetch(`${apiBase}${endpoint}`, {
+      const authHeaders = buildAuthHeaders(provider, apiKey);
+      const response = await requestModelEndpoint('chat', resolved?.id || model, endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          ...authHeaders,
         },
         body: JSON.stringify(body),
         signal: controller.signal,

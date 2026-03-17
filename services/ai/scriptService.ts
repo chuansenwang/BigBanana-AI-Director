@@ -22,6 +22,8 @@ import {
   chatCompletionStream,
   checkApiKey,
   getApiBase,
+  requestModelEndpoint,
+  resolveModel,
   resolveRequestModel,
   parseHttpError,
   getActiveVideoModel,
@@ -38,6 +40,8 @@ import {
   withTemplateFallback,
 } from '../promptTemplateService';
 import { normalizeSceneId } from '../storyboardIdUtils';
+import { getProviderById } from '../modelRegistry';
+import { buildAuthHeaders } from '../providerAuthService';
 
 // Re-export 日志回调函数（保持外部 API 兼容）
 export { setScriptLogCallback, clearScriptLogCallback, logScriptProgress } from './apiCore';
@@ -253,6 +257,8 @@ export const inferVisualStyleFromImage = async (
   abortSignal?: AbortSignal
 ): Promise<VisualStyleInferenceResult> => {
   const apiKey = checkApiKey('chat', model);
+  const resolvedChatModel = resolveModel('chat', model);
+  const authHeaders = buildAuthHeaders(getProviderById(resolvedChatModel?.providerId || ''), apiKey);
   const requestModel = resolveRequestModel('chat', model);
   const apiBase = getApiBase('chat', model);
   const endpoint = '/v1/chat/completions';
@@ -305,11 +311,11 @@ export const inferVisualStyleFromImage = async (
 
   try {
     const response = await retryOperation(async () => {
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const res = await requestModelEndpoint('chat', resolvedChatModel?.id || model, endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          ...authHeaders,
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
@@ -398,6 +404,12 @@ export const parseScriptStructure = async (
   model: string = 'gpt-5.2',
   abortSignal?: AbortSignal
 ): Promise<ScriptData> => {
+  const resolvedChatModel = resolveModel('chat', model);
+  const chatProvider = getProviderById(resolvedChatModel?.providerId || '');
+  const isProxyChatModel = chatProvider?.connectionMode === 'proxy';
+  const maxInputChars = isProxyChatModel ? 12000 : 30000;
+  const parseStructureMaxTokens = isProxyChatModel ? 3072 : undefined;
+
   const wait = async (ms: number) =>
     new Promise<void>((resolve, reject) => {
       let onAbort: (() => void) | null = null;
@@ -527,9 +539,10 @@ export const parseScriptStructure = async (
     3. Extract scenes (id, location, time, atmosphere).
     4. Extract recurring props/items that appear in multiple scenes (id, name, category, description).
     5. Break down the story into paragraphs linked to scenes.
+    ${isProxyChatModel ? '6. Keep each field concise; prefer compact summaries over long quotations.' : ''}
     
     Input:
-    "${rawText.slice(0, 30000)}" // Limit input context if needed
+    "${rawText.slice(0, maxInputChars)}" // Limit input context if needed
     
     Output ONLY valid JSON with this structure:
     {
@@ -545,7 +558,7 @@ export const parseScriptStructure = async (
 
   ensureNotAborted();
   const responseText = await retryOperation(
-    () => chatCompletion(prompt, model, 0.7, 8192, 'json_object', 600000, abortSignal),
+        () => chatCompletion(prompt, model, 0.7, parseStructureMaxTokens, 'json_object', 600000, abortSignal),
     3,
     2000,
     abortSignal
@@ -1737,7 +1750,7 @@ export const generateShotList = async (
       logScriptProgress(`开始生成分镜：${sceneProgressLabel}`);
       ensureNotAborted();
       responseText = await retryOperation(
-        () => chatCompletion(prompt, model, 0.5, 8192, 'json_object', 600000, abortSignal),
+        () => chatCompletion(prompt, model, 0.5, undefined, 'json_object', 600000, abortSignal),
         3,
         2000,
         abortSignal
@@ -1771,7 +1784,7 @@ export const generateShotList = async (
 
         try {
           const repairedText = await retryOperation(
-            () => chatCompletion(repairPrompt, model, 0.4, 8192, 'json_object', 600000, abortSignal),
+            () => chatCompletion(repairPrompt, model, 0.4, undefined, 'json_object', 600000, abortSignal),
             2,
             2000,
             abortSignal
@@ -2161,7 +2174,7 @@ ${originalScript}
 `;
 
   try {
-    const rawResult = await retryOperation(() => chatCompletion(prompt, model, 0.7, 8192));
+    const rawResult = await retryOperation(() => chatCompletion(prompt, model, 0.7));
     const result = trimByCharLimit(rawResult, maxOutputChars);
     if (result.length < rawResult.length && maxOutputChars) {
       console.warn(`⚠️ rewriteScript 输出超限，已自动截断到 ${maxOutputChars} 字符`);

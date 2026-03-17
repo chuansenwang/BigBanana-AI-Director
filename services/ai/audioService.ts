@@ -13,6 +13,9 @@ import {
   resolveRequestModel,
   parseHttpError,
 } from './apiCore';
+import { getProviderById } from '../modelRegistry';
+import { buildAuthHeaders } from '../providerAuthService';
+import { callProviderFetch } from '../modelRequestService';
 
 export type DubbingMode = 'narration' | 'dialogue';
 
@@ -74,7 +77,9 @@ const extractTextFromMessageContent = (content: any): string => {
 const callSpeechEndpoint = async (
   apiBase: string,
   endpoint: string,
-  apiKey: string,
+  providerId: string | undefined,
+  apiKey: string | undefined,
+  authHeaders: Record<string, string>,
   model: string,
   promptText: string,
   voice: string,
@@ -86,11 +91,12 @@ const callSpeechEndpoint = async (
 
   try {
     const response = await retryOperation(async () => {
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const res = await callProviderFetch(`${apiBase}${endpoint}`, {
         method: 'POST',
+        providerId,
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           model,
@@ -160,14 +166,17 @@ export const generateDubbingAudio = async (
 
   const apiKey = checkApiKey('audio', requestedModel);
   const apiBase = getApiBase('audio', requestedModel);
+  const authHeaders = buildAuthHeaders(getProviderById(resolvedAudioModel?.providerId || ''), apiKey);
   const promptText = buildPromptText(rawText, mode, language);
 
   if (endpoint.includes('/audio/speech')) {
     const audioDataUrl = await callSpeechEndpoint(
-      apiBase,
-      endpoint,
-      apiKey,
-      usedModel,
+        apiBase,
+        endpoint,
+        resolvedAudioModel?.providerId,
+        apiKey,
+        authHeaders,
+        usedModel,
       promptText,
       usedVoice,
       usedFormat,
@@ -188,11 +197,12 @@ export const generateDubbingAudio = async (
 
   try {
     const response = await retryOperation(async () => {
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const res = await callProviderFetch(`${apiBase}${endpoint}`, {
         method: 'POST',
+        providerId: resolvedAudioModel?.providerId,
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          ...authHeaders,
         },
         body: JSON.stringify({
           model: usedModel,
@@ -247,4 +257,3 @@ export const generateDubbingAudio = async (
     clearTimeout(timeoutId);
   }
 };
-

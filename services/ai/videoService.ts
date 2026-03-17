@@ -16,6 +16,9 @@ import {
   getSoraVideoSize,
 } from './apiCore';
 import { toFriendlyModerationMessage } from '../errorMessageService';
+import { getProviderById } from '../modelRegistry';
+import { buildAuthHeaders } from '../providerAuthService';
+import { callProviderFetch } from '../modelRequestService';
 
 const VOLCENGINE_TASK_DEFAULT_ENDPOINT = '/api/v3/contents/generations/tasks';
 const VOLCENGINE_DEFAULT_MODEL = 'doubao-seedance-1-5-pro-251215';
@@ -66,7 +69,9 @@ const generateVideoAsync = async (
   prompt: string,
   startImageBase64: string | undefined,
   endImageBase64: string | undefined,
-  apiKey: string,
+  apiKey: string | undefined,
+  providerId: string | undefined,
+  modelId: string | undefined,
   aspectRatio: AspectRatio = '16:9',
   duration: VideoDuration = 8,
   modelName: string = 'sora-2'
@@ -91,7 +96,8 @@ const generateVideoAsync = async (
 
   console.log(`📐 视频尺寸: ${VIDEO_WIDTH}x${VIDEO_HEIGHT}`);
 
-  const apiBase = getApiBase('video', resolvedModelName);
+  const apiBase = getApiBase('video', modelId || resolvedModelName);
+  const authHeaders = buildAuthHeaders(getProviderById(providerId || ''), apiKey);
 
   // Step 1: 创建视频任务
   const formData = new FormData();
@@ -126,10 +132,11 @@ const generateVideoAsync = async (
     console.log('✅ 参考图片已调整尺寸并添加');
   }
 
-  const createResponse = await fetch(`${apiBase}/v1/videos`, {
+  const createResponse = await callProviderFetch(`${apiBase}/v1/videos`, {
     method: 'POST',
+    providerId,
     headers: {
-      'Authorization': `Bearer ${apiKey}`
+      ...authHeaders,
     },
     body: formData
   });
@@ -141,15 +148,8 @@ const generateVideoAsync = async (
     if (createResponse.status === 500) {
       throw new Error('当前请求较多，暂时未能处理成功，请稍后重试。');
     }
-    let errorMessage = `创建任务失败: HTTP ${createResponse.status}`;
-    try {
-      const errorData = await createResponse.json();
-      errorMessage = errorData.error?.message || errorMessage;
-    } catch (e) {
-      const errorText = await createResponse.text();
-      if (errorText) errorMessage = errorText;
-    }
-    throw new Error(toFriendlyVideoErrorMessage(errorMessage));
+    const error = await parseHttpError(createResponse);
+    throw new Error(toFriendlyVideoErrorMessage(error.message));
   }
 
   const createData = await createResponse.json();
@@ -171,11 +171,12 @@ const generateVideoAsync = async (
   while (Date.now() - startTime < maxPollingTime) {
     await new Promise(resolve => setTimeout(resolve, pollingInterval));
 
-    const statusResponse = await fetch(`${apiBase}/v1/videos/${taskId}`, {
+    const statusResponse = await callProviderFetch(`${apiBase}/v1/videos/${taskId}`, {
       method: 'GET',
+      providerId,
       headers: {
         'Accept': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
+        ...authHeaders,
       }
     });
 
@@ -232,11 +233,12 @@ const generateVideoAsync = async (
       const downloadController = new AbortController();
       const downloadTimeoutId = setTimeout(() => downloadController.abort(), downloadTimeout);
 
-      const downloadResponse = await fetch(`${apiBase}/v1/videos/${videoId}/content`, {
+      const downloadResponse = await callProviderFetch(`${apiBase}/v1/videos/${videoId}/content`, {
         method: 'GET',
+        providerId,
         headers: {
           'Accept': '*/*',
-          'Authorization': `Bearer ${apiKey}`
+          ...authHeaders,
         },
         signal: downloadController.signal
       });
@@ -347,7 +349,8 @@ const generateVideoVolcengineTask = async (
   prompt: string,
   startImageBase64: string | undefined,
   endImageBase64: string | undefined,
-  apiKey: string,
+  apiKey: string | undefined,
+  providerId: string | undefined,
   apiBase: string,
   aspectRatio: AspectRatio = '16:9',
   duration: VideoDuration = 5,
@@ -355,6 +358,7 @@ const generateVideoVolcengineTask = async (
   endpoint: string = VOLCENGINE_TASK_DEFAULT_ENDPOINT
 ): Promise<string> => {
   const taskEndpoint = normalizeEndpoint(endpoint, VOLCENGINE_TASK_DEFAULT_ENDPOINT);
+  const authHeaders = buildAuthHeaders(getProviderById(providerId || ''), apiKey);
 
   if (endImageBase64) {
     console.warn('⚠️ Volcengine task mode currently uses start-frame only. End frame will be ignored.');
@@ -387,11 +391,12 @@ const generateVideoVolcengineTask = async (
   const hasImageInput = !!startImageBase64;
   const ratio = mapVolcengineRatio(aspectRatio, hasImageInput);
 
-  const createResponse = await fetch(`${apiBase}${taskEndpoint}`, {
+  const createResponse = await callProviderFetch(`${apiBase}${taskEndpoint}`, {
     method: 'POST',
+    providerId,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      ...authHeaders,
     },
     body: JSON.stringify({
       model: modelName || VOLCENGINE_DEFAULT_MODEL,
@@ -434,11 +439,12 @@ const generateVideoVolcengineTask = async (
   while (Date.now() - startTime < maxPollingTime) {
     await new Promise(resolve => setTimeout(resolve, pollingInterval));
 
-    const statusResponse = await fetch(`${apiBase}${taskEndpoint}/${taskId}`, {
+    const statusResponse = await callProviderFetch(`${apiBase}${taskEndpoint}/${taskId}`, {
       method: 'GET',
+      providerId,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
+        ...authHeaders,
       },
     });
 
@@ -500,6 +506,8 @@ export const generateVideo = async (
   const apiKey = checkApiKey('video', model);
   const apiBase = getApiBase('video', model);
   const resolvedEndpoint = (resolvedVideoModel as any)?.endpoint || '';
+  const providerId = resolvedVideoModel?.providerId;
+  const authHeaders = buildAuthHeaders(getProviderById(providerId || ''), apiKey);
   const normalizedRequestModel = (requestModel || resolvedVideoModelId || '').toLowerCase();
   const isSoraCompatibleModel = isSoraCompatibleVideoModel(normalizedRequestModel);
   const isVolcengineTaskMode =
@@ -510,9 +518,10 @@ export const generateVideo = async (
     return generateVideoVolcengineTask(
       prompt,
       startImageBase64,
-      endImageBase64,
-      apiKey,
-      apiBase,
+        endImageBase64,
+        apiKey,
+        providerId,
+        apiBase,
       aspectRatio,
       duration,
       requestModel || resolvedVideoModelId || VOLCENGINE_DEFAULT_MODEL,
@@ -528,13 +537,15 @@ export const generateVideo = async (
   // 异步模式
   if (isAsyncMode) {
     return generateVideoAsync(
-      prompt,
-      startImageBase64,
-      endImageBase64,
-      apiKey,
-      aspectRatio,
-      duration,
-      requestModel || resolvedVideoModelId || 'sora-2'
+        prompt,
+        startImageBase64,
+        endImageBase64,
+        apiKey,
+        providerId,
+        resolvedVideoModelId,
+        aspectRatio,
+        duration,
+        requestModel || resolvedVideoModelId || 'sora-2'
     );
   }
 
@@ -572,11 +583,12 @@ export const generateVideo = async (
 
   try {
     const response = await retryOperation(async () => {
-      const res = await fetch(`${apiBase}/v1/chat/completions`, {
+      const res = await callProviderFetch(`${apiBase}/v1/chat/completions`, {
         method: 'POST',
+        providerId,
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          ...authHeaders,
         },
         body: JSON.stringify({
           model: actualModel,

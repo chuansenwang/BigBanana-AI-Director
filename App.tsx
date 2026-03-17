@@ -108,8 +108,14 @@ function EpisodeWorkspace() {
   const [showSaveStatus, setShowSaveStatus] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showModelConfig, setShowModelConfig] = useState(false);
+  const [modelConfigVersion, setModelConfigVersion] = useState(0);
   const saveTimeoutRef = useRef<any>(null);
   const hideStatusTimeoutRef = useRef<any>(null);
+
+  const handleCloseModelConfig = () => {
+    setShowModelConfig(false);
+    setModelConfigVersion(prev => prev + 1);
+  };
 
   useEffect(() => {
     if (!episodeId) return;
@@ -223,11 +229,11 @@ function EpisodeWorkspace() {
   const renderStage = () => {
     switch (currentEpisode.stage) {
       case 'script':
-        return <StageScript project={currentEpisode} updateProject={handleUpdateProject} onShowModelConfig={() => setShowModelConfig(true)} onGeneratingChange={setIsGenerating} />;
+        return <StageScript project={currentEpisode} updateProject={handleUpdateProject} onShowModelConfig={() => setShowModelConfig(true)} onGeneratingChange={setIsGenerating} modelConfigVersion={modelConfigVersion} />;
       case 'assets':
         return <StageAssets project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} />;
       case 'director':
-        return <StageDirector project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} />;
+        return <StageDirector project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} modelConfigVersion={modelConfigVersion} />;
       case 'export':
         return <StageExport project={currentEpisode} />;
       case 'prompts':
@@ -295,7 +301,7 @@ function EpisodeWorkspace() {
         )}
       </main>
       {showOnboarding && <Onboarding onComplete={() => setShowOnboarding(false)} onQuickStart={() => setShowOnboarding(false)} currentApiKey="" onSaveApiKey={() => {}} />}
-      <ModelConfigModal isOpen={showModelConfig} onClose={() => setShowModelConfig(false)} />
+      <ModelConfigModal isOpen={showModelConfig} onClose={handleCloseModelConfig} />
     </div>
   );
 }

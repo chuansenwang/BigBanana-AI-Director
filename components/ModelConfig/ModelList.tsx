@@ -21,6 +21,7 @@ import {
 import { useAlert } from '../GlobalAlert';
 import ModelCard from './ModelCard';
 import AddModelForm from './AddModelForm';
+import { validateCustomModelDraft } from '../../services/modelValidationService';
 
 interface ModelListProps {
   type: ModelType;
@@ -54,9 +55,29 @@ const ModelList: React.FC<ModelListProps> = ({ type, onRefresh }) => {
   };
 
   const handleSetActiveModel = (modelId: string) => {
+    const model = models.find(m => m.id === modelId);
+    if (!model) {
+      showAlert('未找到目标模型', { type: 'error' });
+      return;
+    }
+
+    if (!model.isBuiltIn) {
+      const validation = validateCustomModelDraft({
+        name: model.name,
+        apiModel: model.apiModel || model.id,
+        type: model.type,
+        provider: getProviderById(model.providerId),
+        endpoint: model.endpoint,
+        params: model.params as any,
+      });
+      if (!validation.valid) {
+        showAlert(validation.errors.join('\n'), { type: 'warning' });
+        return;
+      }
+    }
+
     if (setActiveModel(type, modelId)) {
       setActiveModelId(modelId);
-      const model = models.find(m => m.id === modelId);
       const provider = model ? getProviderById(model.providerId) : null;
       showAlert(
         `已切换到 ${model?.name}${provider ? ` (${provider.name})` : ''}`, 
@@ -69,6 +90,25 @@ const ModelList: React.FC<ModelListProps> = ({ type, onRefresh }) => {
   };
 
   const handleUpdateModel = (modelId: string, updates: Partial<ModelDefinition>) => {
+    const currentModel = models.find((model) => model.id === modelId);
+    if (!currentModel) return;
+
+    const nextModel = { ...currentModel, ...updates } as ModelDefinition;
+    if (!nextModel.isBuiltIn) {
+      const validation = validateCustomModelDraft({
+        name: nextModel.name,
+        apiModel: nextModel.apiModel || nextModel.id,
+        type: nextModel.type,
+        provider: getProviderById(nextModel.providerId),
+        endpoint: nextModel.endpoint,
+        params: nextModel.params as any,
+      });
+      if (!validation.valid) {
+        showAlert(validation.errors.join('\n'), { type: 'warning' });
+        return;
+      }
+    }
+
     if (updateModel(modelId, updates)) {
       loadModels();
     }

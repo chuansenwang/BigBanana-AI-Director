@@ -7,6 +7,7 @@ import {
   ModelType,
   ModelDefinition,
   ModelProvider,
+  ProviderProtocol,
   ModelRegistryState,
   ActiveModels,
   ChatModelDefinition,
@@ -20,6 +21,7 @@ import {
   VideoDuration,
 } from '../types/model';
 import { normalizeChatModelId } from './modelIdUtils';
+import { inferProviderProtocol } from './modelProtocolService';
 
 // localStorage 键名
 const STORAGE_KEY = 'bigbanana_model_registry';
@@ -27,6 +29,35 @@ const API_KEY_STORAGE_KEY = 'antsk_api_key';
 
 // 规范化 URL（去尾部斜杠、转小写）用于去重
 const normalizeBaseUrl = (url: string): string => url.trim().replace(/\/+$/, '').toLowerCase();
+
+const findFallbackActiveModelId = (
+  models: ModelDefinition[],
+  type: ModelType,
+  excludedIds: string[] = []
+): string => {
+  const excluded = new Set(excludedIds);
+  const enabledCandidate = models.find(
+    (model) => model.type === type && model.isEnabled && !excluded.has(model.id)
+  );
+  if (enabledCandidate) return enabledCandidate.id;
+
+  const anyCandidate = models.find(
+    (model) => model.type === type && !excluded.has(model.id)
+  );
+  return anyCandidate?.id || DEFAULT_ACTIVE_MODELS[type];
+};
+
+const normalizeActiveModels = (state: ModelRegistryState): boolean => {
+  let changed = false;
+  (['chat', 'image', 'video', 'audio'] as ModelType[]).forEach((type) => {
+    const activeId = state.activeModels[type];
+    const activeModel = state.models.find((model) => model.id === activeId && model.type === type && model.isEnabled);
+    if (activeModel) return;
+    state.activeModels[type] = findFallbackActiveModelId(state.models, type, activeId ? [activeId] : []);
+    changed = true;
+  });
+  return changed;
+};
 
 // 运行时状态缓存
 let registryState: ModelRegistryState | null = null;
@@ -106,6 +137,15 @@ export const loadRegistry = (): ModelRegistryState => {
       const builtInProviderIds = BUILTIN_PROVIDERS.map(p => p.id);
       const builtInModelIds = ALL_BUILTIN_MODELS.map(m => m.id);
       
+      // 迁移提供商协议字段
+      parsed.providers = parsed.providers.map((provider) => ({
+        ...provider,
+        protocol: provider.protocol || inferProviderProtocol(provider.baseUrl),
+        authMode: provider.authMode || 'required',
+        connectionMode: provider.connectionMode || 'direct',
+        authHeaderType: provider.authHeaderType || 'authorization-bearer',
+      }));
+
       // 合并内置提供商
       const existingProviderIds = parsed.providers.map(p => p.id);
       BUILTIN_PROVIDERS.forEach(bp => {
@@ -244,6 +284,10 @@ export const loadRegistry = (): ModelRegistryState => {
           activeModelMigrated = true;
         }
       });
+
+      if (normalizeActiveModels(parsed)) {
+        activeModelMigrated = true;
+      }
       
       // 同步全局 API Key
       parsed.globalApiKey = localStorage.getItem(API_KEY_STORAGE_KEY) || parsed.globalApiKey;
@@ -326,14 +370,21 @@ export const getDefaultProvider = (): ModelProvider => {
 /**
  * 添加提供商
  */
-export const addProvider = (provider: Omit<ModelProvider, 'id' | 'isBuiltIn'>): ModelProvider => {
+export const addProvider = (
+  provider: Omit<ModelProvider, 'id' | 'isBuiltIn' | 'protocol' | 'authMode' | 'connectionMode' | 'authHeaderType'> & { protocol?: ProviderProtocol; authMode?: ModelProvider['authMode']; connectionMode?: ModelProvider['connectionMode']; authHeaderType?: ModelProvider['authHeaderType'] }
+): ModelProvider => {
   const state = loadRegistry();
   const normalized = normalizeBaseUrl(provider.baseUrl);
   const existing = state.providers.find(p => normalizeBaseUrl(p.baseUrl) === normalized);
   if (existing) return existing;
   const newProvider: ModelProvider = {
     ...provider,
+    baseUrl: normalized,
     id: `provider_${Date.now()}`,
+    protocol: provider.protocol || inferProviderProtocol(provider.baseUrl),
+    authMode: provider.authMode || 'required',
+    connectionMode: provider.connectionMode || 'direct',
+    authHeaderType: provider.authHeaderType || 'authorization-bearer',
     isBuiltIn: false,
   };
   state.providers.push(newProvider);
@@ -354,6 +405,18 @@ export const updateProvider = (id: string, updates: Partial<ModelProvider>): boo
     delete updates.id;
     delete updates.isBuiltIn;
     delete updates.baseUrl;
+    delete updates.protocol;
+    delete updates.authMode;
+    delete updates.connectionMode;
+    delete updates.authHeaderType;
+  }
+
+  if (updates.baseUrl) {
+    const normalized = normalizeBaseUrl(updates.baseUrl);
+    updates.baseUrl = normalized;
+    if (!updates.protocol) {
+      updates.protocol = inferProviderProtocol(normalized);
+    }
   }
 
   state.providers[index] = { ...state.providers[index], ...updates };
@@ -374,6 +437,8 @@ export const removeProvider = (id: string): boolean => {
   // 删除该提供商的所有模型
   state.models = state.models.filter(m => m.providerId !== id);
   state.providers = state.providers.filter(p => p.id !== id);
+
+  normalizeActiveModels(state);
   
   saveRegistry(state);
   return true;
@@ -595,15 +660,8 @@ export const removeModel = (id: string): boolean => {
   // 不能删除内置模型
   if (!model || model.isBuiltIn) return false;
   
-  // 如果删除的是当前激活的模型，切换到同类型的第一个启用模型
-  if (state.activeModels[model.type] === id) {
-    const fallback = state.models.find(m => m.type === model.type && m.id !== id && m.isEnabled);
-    if (fallback) {
-      state.activeModels[model.type] = fallback.id;
-    }
-  }
-  
   state.models = state.models.filter(m => m.id !== id);
+  normalizeActiveModels(state);
   saveRegistry(state);
   return true;
 };

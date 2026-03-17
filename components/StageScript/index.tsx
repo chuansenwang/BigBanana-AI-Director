@@ -34,18 +34,21 @@ import {
   getShotGroupPrefix,
   shotBelongsToGroup,
 } from '../../services/storyboardIdUtils';
+import { getActiveChatModel, getChatModels } from '../../services/modelRegistry';
+import { normalizeChatModelId } from '../../services/modelIdUtils';
 
 interface Props {
   project: ProjectState;
   updateProject: (updates: Partial<ProjectState> | ((prev: ProjectState) => ProjectState)) => void;
   onShowModelConfig?: () => void;
   onGeneratingChange?: (isGenerating: boolean) => void;
+  modelConfigVersion?: number;
 }
 
 type TabMode = 'story' | 'script';
 type AnalyzeRunStep = ScriptGenerationStep | 'done';
 
-const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfig, onGeneratingChange }) => {
+const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfig, onGeneratingChange, modelConfigVersion = 0 }) => {
   const { showAlert } = useAlert();
   const promptTemplates = useMemo(
     () => resolvePromptTemplateConfig(project.promptTemplateOverrides),
@@ -57,6 +60,38 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     if (selected !== 'custom') return selected;
     const trimmed = customInput.trim();
     return trimmed || fallback;
+  };
+
+  const getPreferredChatModelId = (): string => {
+    const activeChatModel = getActiveChatModel();
+    if (activeChatModel?.isEnabled) return activeChatModel.id;
+
+    const enabledChatModel = getChatModels().find((model) => model.isEnabled);
+    return enabledChatModel?.id || DEFAULTS.model;
+  };
+
+  const resolveStageChatModel = (selected: string, customInput: string, fallback?: string): string => {
+    const preferredChatModelId = getPreferredChatModelId();
+    const rawValue = getDraftValue(selected, customInput, fallback || preferredChatModelId);
+    const normalizedValue = normalizeChatModelId(rawValue) || rawValue;
+    const enabledChatModels = getChatModels().filter((model) => model.isEnabled);
+    const activeChatModel = getActiveChatModel();
+
+    const exactIdMatch = enabledChatModels.find((model) => model.id === normalizedValue);
+    if (exactIdMatch) return exactIdMatch.id;
+
+    if (
+      activeChatModel?.isEnabled &&
+      (activeChatModel.id === normalizedValue || activeChatModel.apiModel === normalizedValue)
+    ) {
+      return activeChatModel.id;
+    }
+
+    const resolvedModel = enabledChatModels.find(
+      (model) => model.apiModel === normalizedValue
+    );
+
+    return resolvedModel?.id || preferredChatModelId;
   };
 
   const hashRaw = (raw: string): string => {
@@ -307,7 +342,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
   const [localTitle, setLocalTitle] = useState(project.title);
   const [localDuration, setLocalDuration] = useState(project.targetDuration || DEFAULTS.duration);
   const [localLanguage, setLocalLanguage] = useState(project.language || DEFAULTS.language);
-  const [localModel, setLocalModel] = useState(project.shotGenerationModel || DEFAULTS.model);
+  const [localModel, setLocalModel] = useState(resolveStageChatModel(project.shotGenerationModel || '', ''));
   const [localVisualStyle, setLocalVisualStyle] = useState(project.visualStyle || DEFAULTS.visualStyle);
   const [enableQualityCheck, setEnableQualityCheck] = useState(true);
   const [customDurationInput, setCustomDurationInput] = useState('');
@@ -350,7 +385,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     setLocalTitle(project.title);
     setLocalDuration(project.targetDuration || DEFAULTS.duration);
     setLocalLanguage(project.language || DEFAULTS.language);
-    setLocalModel(project.shotGenerationModel || DEFAULTS.model);
+    setLocalModel(resolveStageChatModel(project.shotGenerationModel || '', ''));
     setLocalVisualStyle(project.visualStyle || DEFAULTS.visualStyle);
     setEnableQualityCheck(true);
     setRewriteInstruction('');
@@ -358,6 +393,15 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     setLastRewriteSnapshot(null);
     setIsInferringVisualStyle(false);
   }, [project.id]);
+
+  useEffect(() => {
+    const activeChatModel = getActiveChatModel();
+    if (!activeChatModel?.isEnabled) return;
+    if (localModel === activeChatModel.id && !customModelInput.trim()) return;
+
+    setLocalModel(activeChatModel.id);
+    setCustomModelInput('');
+  }, [modelConfigVersion]);
 
   // 上报生成状态给父组件，用于导航锁定
   useEffect(() => {
@@ -388,7 +432,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     if (isProcessing || isContinuing || isRewriting) return;
 
     const draftDuration = getDraftValue(localDuration, customDurationInput, project.targetDuration || DEFAULTS.duration);
-    const draftModel = getDraftValue(localModel, customModelInput, project.shotGenerationModel || DEFAULTS.model);
+    const draftModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const draftVisualStyle = getDraftValue(localVisualStyle, customStyleInput, project.visualStyle || DEFAULTS.visualStyle);
 
     const draftUpdates = {
@@ -448,7 +492,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     if (isInferringVisualStyle || isProcessing || isContinuing || isRewriting) {
       return;
     }
-    const finalModel = getFinalValue(localModel, customModelInput);
+    const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
 
     if (!finalModel) {
       setError('Please choose or input a chat model first.');
@@ -491,7 +535,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
 
   const handleAnalyze = async () => {
     const finalDuration = getFinalValue(localDuration, customDurationInput);
-    const finalModel = getFinalValue(localModel, customModelInput);
+    const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const finalVisualStyle = getFinalValue(localVisualStyle, customStyleInput);
 
     const validation = validateConfig({
@@ -816,7 +860,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
   };
 
   const handleContinueScript = async () => {
-    const finalModel = getFinalValue(localModel, customModelInput);
+    const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const baseScript = localScript;
     const separator = baseScript.trim() ? '\n\n' : '';
     const continueBudget = SCRIPT_HARD_LIMIT - baseScript.length - separator.length;
@@ -910,7 +954,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
   };
 
   const handleRewriteScript = async () => {
-    const finalModel = getFinalValue(localModel, customModelInput);
+    const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const baseScript = localScript;
     
     if (!baseScript.trim()) {
@@ -1005,7 +1049,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     : '';
 
   const handleRewriteSelection = async () => {
-    const finalModel = getFinalValue(localModel, customModelInput);
+    const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const currentSelection = selectionRange;
     const trimmedInstruction = rewriteInstruction.trim();
 
@@ -1114,7 +1158,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     script: localScript,
     language: localLanguage,
     targetDuration: getDraftValue(localDuration, customDurationInput, project.targetDuration || DEFAULTS.duration),
-    model: getDraftValue(localModel, customModelInput, project.shotGenerationModel || DEFAULTS.model),
+      model: resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel),
     visualStyle: getDraftValue(localVisualStyle, customStyleInput, project.visualStyle || DEFAULTS.visualStyle),
     enableQualityCheck
   });

@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp, Trash2, ToggleLeft, ToggleRight, CheckCircle, Circle } from 'lucide-react';
+import { ChevronDown, ChevronUp, ToggleLeft, ToggleRight, CheckCircle, Circle } from 'lucide-react';
 import { 
   ModelDefinition, 
   ChatModelParams,
@@ -12,9 +12,11 @@ import {
   VideoModelParams,
   AudioModelParams,
   AspectRatio,
-  VideoDuration
+  VideoDuration,
+  ImageApiFormat,
 } from '../../types/model';
-import { getProviderById } from '../../services/modelRegistry';
+import { getProviderById, getProviders } from '../../services/modelRegistry';
+import { isProtocolSupportedForType } from '../../services/modelProtocolService';
 
 interface ModelCardProps {
   model: ModelDefinition;
@@ -37,7 +39,13 @@ const ModelCard: React.FC<ModelCardProps> = ({
 }) => {
   const [editParams, setEditParams] = useState<any>(model.params);
   const [editApiKey, setEditApiKey] = useState<string>(model.apiKey || '');
+  const [editName, setEditName] = useState(model.name);
+  const [editApiModel, setEditApiModel] = useState(model.apiModel || model.id);
+  const [editDescription, setEditDescription] = useState(model.description || '');
+  const [editEndpoint, setEditEndpoint] = useState(model.endpoint || '');
+  const [editProviderId, setEditProviderId] = useState(model.providerId);
   const provider = getProviderById(model.providerId);
+  const editableProviders = getProviders().filter((candidate) => isProtocolSupportedForType(candidate.protocol, model.type));
   const isVolcengineModel = model.providerId === 'volcengine';
   const modelHasApiKey = Boolean(model.apiKey?.trim());
   const providerHasApiKey = Boolean(provider?.apiKey?.trim());
@@ -56,6 +64,10 @@ const ModelCard: React.FC<ModelCardProps> = ({
   const handleApiKeyChange = (value: string) => {
     setEditApiKey(value);
     onUpdate({ apiKey: value.trim() || undefined });
+  };
+
+  const handleMetadataChange = (updates: Partial<ModelDefinition>) => {
+    onUpdate(updates);
   };
 
   const renderChatParams = (params: ChatModelParams) => (
@@ -265,17 +277,6 @@ const ModelCard: React.FC<ModelCardProps> = ({
             )}
           </button>
 
-          {/* 删除按钮（仅非内置模型） */}
-          {!model.isBuiltIn && (
-            <button
-              onClick={onDelete}
-              className="text-[var(--text-tertiary)] hover:text-[var(--error-text)] transition-colors"
-              title="删除"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-
           {/* 展开/收起 */}
           <button
             onClick={onToggleExpand}
@@ -294,6 +295,74 @@ const ModelCard: React.FC<ModelCardProps> = ({
       {isExpanded && (
         <div className="px-4 pb-4 pt-0 border-t border-[var(--border-primary)]">
           <div className="pt-4 space-y-4">
+            {!model.isBuiltIn && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">模型名称</label>
+                  <input
+                    type="text"
+                    value={editName}
+                    onChange={(e) => {
+                      setEditName(e.target.value);
+                      handleMetadataChange({ name: e.target.value.trim() || model.name });
+                    }}
+                    className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">API 模型名</label>
+                  <input
+                    type="text"
+                    value={editApiModel}
+                    onChange={(e) => {
+                      setEditApiModel(e.target.value);
+                      handleMetadataChange({ apiModel: e.target.value.trim() || model.apiModel || model.id });
+                    }}
+                    className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)] font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">提供商</label>
+                  <select
+                    value={editProviderId}
+                    onChange={(e) => {
+                      setEditProviderId(e.target.value);
+                      handleMetadataChange({ providerId: e.target.value });
+                    }}
+                    className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)]"
+                  >
+                    {editableProviders.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">Endpoint</label>
+                  <input
+                    type="text"
+                    value={editEndpoint}
+                    onChange={(e) => {
+                      setEditEndpoint(e.target.value);
+                      handleMetadataChange({ endpoint: e.target.value.trim() || undefined });
+                    }}
+                    className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)] font-mono"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">描述</label>
+                  <input
+                    type="text"
+                    value={editDescription}
+                    onChange={(e) => {
+                      setEditDescription(e.target.value);
+                      handleMetadataChange({ description: e.target.value.trim() || undefined });
+                    }}
+                    className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)]"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* 模型专属 API Key */}
             <div>
               <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">
@@ -320,6 +389,27 @@ const ModelCard: React.FC<ModelCardProps> = ({
                 <p className="text-[9px] text-[var(--success)] mt-1">✓ 已配置专属 Key</p>
               )}
             </div>
+
+            {!model.isBuiltIn && model.type === 'image' && (
+              <div>
+                <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">图片协议</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['gemini', 'openai'] as ImageApiFormat[]).map((format) => (
+                    <button
+                      key={format}
+                      onClick={() => handleParamChange('apiFormat', format)}
+                      className={`py-2 text-xs rounded transition-colors ${
+                        editParams.apiFormat === format
+                          ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                          : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                      }`}
+                    >
+                      {format === 'gemini' ? 'Gemini' : 'OpenAI Images'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             
             {model.type === 'chat' && renderChatParams(model.params)}
             {model.type === 'image' && renderImageParams(model.params)}

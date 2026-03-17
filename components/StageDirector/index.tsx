@@ -42,7 +42,7 @@ import { findSceneByIdCompat } from '../../services/storyboardIdUtils';
 import NineGridPreview from './NineGridPreview';
 import { useAlert } from '../GlobalAlert';
 import { AspectRatioSelector } from '../AspectRatioSelector';
-import { getUserAspectRatio, setUserAspectRatio, getModelById, getActiveImageModel, getActiveAudioModel } from '../../services/modelRegistry';
+import { getUserAspectRatio, setUserAspectRatio, getModelById, getActiveImageModel, getActiveAudioModel, getActiveVideoModel } from '../../services/modelRegistry';
 import { persistVideoReference } from '../../services/videoStorageService';
 import { runKeyframePreflight, runVideoPreflight, formatLintIssues } from '../../services/promptLintService';
 import { assessShotQuality, getProjectAverageQualityScore } from '../../services/qualityAssessmentService';
@@ -56,9 +56,10 @@ interface Props {
   updateProject: (updates: Partial<ProjectState> | ((prev: ProjectState) => ProjectState)) => void;
   onApiKeyError?: (error: any) => boolean;
   onGeneratingChange?: (isGenerating: boolean) => void;
+  modelConfigVersion?: number;
 }
 
-const StageDirector: React.FC<Props> = ({ project, updateProject, onApiKeyError, onGeneratingChange }) => {
+const StageDirector: React.FC<Props> = ({ project, updateProject, onApiKeyError, onGeneratingChange, modelConfigVersion = 0 }) => {
   const { showAlert } = useAlert();
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
   const [batchProgress, setBatchProgress] = useState<{current: number, total: number, message: string} | null>(null);
@@ -322,6 +323,26 @@ const StageDirector: React.FC<Props> = ({ project, updateProject, onApiKeyError,
       ),
     }));
   }, [project.id]);
+
+  useEffect(() => {
+    const activeVideoModel = getActiveVideoModel();
+    if (!activeVideoModel?.isEnabled) return;
+
+    updateProject((prevProject: ProjectState) => {
+      const hasMismatch = prevProject.shots.some(
+        (shot) => (shot.videoModel || DEFAULTS.videoModel) !== activeVideoModel.id
+      );
+      if (!hasMismatch) return prevProject;
+
+      return {
+        ...prevProject,
+        shots: prevProject.shots.map((shot) => ({
+          ...shot,
+          videoModel: activeVideoModel.id as any,
+        })),
+      };
+    });
+  }, [modelConfigVersion, project.id]);
 
   /**
    * 更新镜头

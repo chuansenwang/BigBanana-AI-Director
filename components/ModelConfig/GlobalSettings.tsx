@@ -4,24 +4,38 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles } from 'lucide-react';
-import { getGlobalApiKey, setGlobalApiKey } from '../../services/modelRegistry';
+import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X } from 'lucide-react';
+import { ModelProvider, ProviderAuthHeaderType, ProviderAuthMode, ProviderConnectionMode, ProviderProtocol } from '../../types/model';
+import { getGlobalApiKey, setGlobalApiKey, getProviders, addProvider, updateProvider } from '../../services/modelRegistry';
 import { verifyApiKey } from '../../services/modelService';
 import { USER_MANUAL_URL } from '../../constants/links';
+import { CUSTOM_PROVIDER_PROTOCOLS } from '../../services/modelProtocolService';
+import { validateProviderDraft } from '../../services/modelValidationService';
+import { useAlert } from '../GlobalAlert';
+import { testProviderConnection } from '../../services/providerConnectionTestService';
 
 interface GlobalSettingsProps {
   onRefresh: () => void;
 }
 
 const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
+  const { showAlert } = useAlert();
   const [apiKey, setApiKey] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyStatus, setVerifyStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [verifyMessage, setVerifyMessage] = useState('');
+  const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [providerDraft, setProviderDraft] = useState({ name: '', baseUrl: '', apiKey: '', protocol: 'openai' as ProviderProtocol, authMode: 'required' as ProviderAuthMode, connectionMode: 'proxy' as ProviderConnectionMode, authHeaderType: 'authorization-bearer' as ProviderAuthHeaderType });
+  const [isAddingProvider, setIsAddingProvider] = useState(false);
+  const [isTestingProvider, setIsTestingProvider] = useState(false);
+  const [providerTestMessage, setProviderTestMessage] = useState('');
+  const [providerTestStatus, setProviderTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
   useEffect(() => {
     const currentKey = getGlobalApiKey() || '';
     setApiKey(currentKey);
+    setProviders(getProviders());
     if (currentKey) {
       setVerifyStatus('success');
       setVerifyMessage('API Key 已配置');
@@ -65,6 +79,121 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     setVerifyMessage('');
     setGlobalApiKey('');
     onRefresh();
+  };
+
+  const reloadProviders = () => {
+    setProviders(getProviders());
+    onRefresh();
+  };
+
+  const startAddProvider = () => {
+    setEditingProviderId(null);
+    setProviderDraft({ name: '', baseUrl: '', apiKey: '', protocol: 'openai', authMode: 'required', connectionMode: 'proxy', authHeaderType: 'authorization-bearer' });
+    setIsAddingProvider(true);
+    setProviderTestMessage('');
+    setProviderTestStatus('idle');
+  };
+
+  const startEditProvider = (provider: ModelProvider) => {
+    setIsAddingProvider(false);
+    setEditingProviderId(provider.id);
+      setProviderDraft({
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey || '',
+        protocol: provider.protocol,
+        authMode: provider.authMode,
+        connectionMode: provider.connectionMode,
+        authHeaderType: provider.authHeaderType,
+      });
+      setProviderTestMessage('');
+      setProviderTestStatus('idle');
+  };
+
+  const cancelProviderEdit = () => {
+    setEditingProviderId(null);
+    setIsAddingProvider(false);
+    setProviderDraft({ name: '', baseUrl: '', apiKey: '', protocol: 'openai', authMode: 'required', connectionMode: 'proxy', authHeaderType: 'authorization-bearer' });
+    setProviderTestMessage('');
+    setProviderTestStatus('idle');
+  };
+
+  const handleTestProvider = async () => {
+    const validation = validateProviderDraft({
+      name: providerDraft.name,
+      baseUrl: providerDraft.baseUrl,
+      protocol: providerDraft.protocol,
+      authMode: providerDraft.authMode,
+      connectionMode: providerDraft.connectionMode,
+      authHeaderType: providerDraft.authHeaderType,
+    });
+
+    if (!validation.valid) {
+      setProviderTestStatus('error');
+      setProviderTestMessage(validation.errors.join('\n'));
+      return;
+    }
+
+    setIsTestingProvider(true);
+    setProviderTestStatus('idle');
+    setProviderTestMessage('');
+
+    try {
+      const result = await testProviderConnection({
+        name: providerDraft.name,
+        baseUrl: providerDraft.baseUrl,
+        apiKey: providerDraft.apiKey.trim() || undefined,
+        protocol: providerDraft.protocol,
+        authMode: providerDraft.authMode,
+        connectionMode: providerDraft.connectionMode,
+        authHeaderType: providerDraft.authHeaderType,
+      });
+
+      setProviderTestStatus(result.success ? 'success' : 'error');
+      setProviderTestMessage(result.detail ? `${result.message}\n${result.detail}` : result.message);
+    } finally {
+      setIsTestingProvider(false);
+    }
+  };
+
+  const saveProviderDraft = () => {
+      const validation = validateProviderDraft({
+        name: providerDraft.name,
+        baseUrl: providerDraft.baseUrl,
+        protocol: providerDraft.protocol,
+        authMode: providerDraft.authMode,
+        connectionMode: providerDraft.connectionMode,
+        authHeaderType: providerDraft.authHeaderType,
+      });
+    if (!validation.valid) {
+      showAlert(validation.errors.join('\n'), { type: 'warning' });
+      return;
+    }
+
+    if (editingProviderId) {
+      updateProvider(editingProviderId, {
+        name: providerDraft.name.trim(),
+        baseUrl: providerDraft.baseUrl.trim(),
+        apiKey: providerDraft.apiKey.trim() || undefined,
+        protocol: providerDraft.protocol,
+        authMode: providerDraft.authMode,
+        connectionMode: providerDraft.connectionMode,
+      });
+    } else {
+      addProvider({
+        name: providerDraft.name.trim(),
+        baseUrl: providerDraft.baseUrl.trim(),
+        apiKey: providerDraft.apiKey.trim() || undefined,
+        protocol: providerDraft.protocol,
+        authMode: providerDraft.authMode,
+        connectionMode: providerDraft.connectionMode,
+        authHeaderType: providerDraft.authHeaderType,
+        isDefault: false,
+      });
+    }
+
+    cancelProviderEdit();
+    reloadProviders();
   };
 
   return (
@@ -147,7 +276,7 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
 
           {/* 说明文字 */}
           <p className="text-[10px] text-[var(--text-muted)] leading-relaxed">
-            全局 API Key 用于所有模型调用。你也可以为单个提供商配置独立的 API Key。
+            全局 API Key 仅作为需要鉴权的模型调用兜底。你也可以为单个提供商配置独立的 API Key，或把自定义提供商设为“无需鉴权”。
           </p>
 
           {/* 操作按钮 */}
@@ -187,6 +316,208 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
           <li>支持添加自定义模型，使用其他 API 服务</li>
           <li>所有配置仅保存在本地浏览器，不会上传到服务器</li>
         </ul>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Server className="w-4 h-4 text-[var(--accent-text)]" />
+            <label className="text-[10px] font-bold text-[var(--text-tertiary)] uppercase tracking-widest">
+              自定义提供商
+            </label>
+          </div>
+          {!isAddingProvider && !editingProviderId && (
+            <button
+              onClick={startAddProvider}
+              className="px-3 py-1.5 bg-[var(--bg-hover)] text-[var(--text-secondary)] text-[10px] rounded hover:bg-[var(--border-secondary)] transition-colors"
+            >
+              添加提供商
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-3">
+          {(isAddingProvider || editingProviderId) && (
+            <div className="bg-[var(--bg-elevated)]/50 border border-[var(--border-secondary)] rounded-lg p-4 space-y-3">
+              <input
+                type="text"
+                placeholder="提供商名称"
+                value={providerDraft.name}
+                onChange={(e) => setProviderDraft((prev) => ({ ...prev, name: e.target.value }))}
+                className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)]"
+              />
+              <input
+                type="text"
+                placeholder="https://api.example.com"
+                value={providerDraft.baseUrl}
+                onChange={(e) => setProviderDraft((prev) => ({ ...prev, baseUrl: e.target.value }))}
+                className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)] font-mono"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                {CUSTOM_PROVIDER_PROTOCOLS.map((protocol) => (
+                  <button
+                    key={protocol}
+                    onClick={() => setProviderDraft((prev) => ({ ...prev, protocol }))}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      providerDraft.protocol === protocol
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    {protocol === 'openai' ? 'OpenAI-compatible' : 'Gemini-style'}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setProviderDraft((prev) => ({ ...prev, authMode: 'required' }))}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    providerDraft.authMode === 'required'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  需要 API Key
+                </button>
+                <button
+                  onClick={() => setProviderDraft((prev) => ({ ...prev, authMode: 'none' }))}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    providerDraft.authMode === 'none'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  无需鉴权
+                </button>
+              </div>
+              {providerDraft.authMode === 'required' && (
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => setProviderDraft((prev) => ({ ...prev, authHeaderType: 'authorization-bearer' }))}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      providerDraft.authHeaderType === 'authorization-bearer'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    Bearer
+                  </button>
+                  <button
+                    onClick={() => setProviderDraft((prev) => ({ ...prev, authHeaderType: 'x-api-key' }))}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      providerDraft.authHeaderType === 'x-api-key'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    x-api-key
+                  </button>
+                  <button
+                    onClick={() => setProviderDraft((prev) => ({ ...prev, authHeaderType: 'x-goog-api-key' }))}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      providerDraft.authHeaderType === 'x-goog-api-key'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    x-goog-api-key
+                  </button>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setProviderDraft((prev) => ({ ...prev, connectionMode: 'direct' }))}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    providerDraft.connectionMode === 'direct'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  浏览器直连
+                </button>
+                <button
+                  onClick={() => setProviderDraft((prev) => ({ ...prev, connectionMode: 'proxy' }))}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    providerDraft.connectionMode === 'proxy'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  本地代理
+                </button>
+              </div>
+              <p className="text-[9px] text-[var(--text-muted)] leading-relaxed">
+                浏览器直连适合已放行 CORS 的接口；多数第三方 OpenAI 兼容接口更适合使用本地代理。
+              </p>
+              <input
+                type="password"
+                placeholder={providerDraft.authMode === 'none' ? '该提供商无需 API Key' : '提供商 API Key（可选）'}
+                value={providerDraft.apiKey}
+                onChange={(e) => setProviderDraft((prev) => ({ ...prev, apiKey: e.target.value }))}
+                className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)] font-mono"
+              />
+              <p className="text-[9px] text-[var(--text-muted)] leading-relaxed">
+                {providerDraft.authMode === 'none'
+                  ? providerDraft.connectionMode === 'proxy'
+                    ? '当前会通过本地代理转发请求，但不会附带 Authorization 头。若上游返回 401，请改成“需要 API Key”。'
+                    : '当前会浏览器直连且不会附带 Authorization 头。若接口存在鉴权要求或 CORS 限制，请改用“需要 API Key”或“本地代理”。'
+                  : providerDraft.connectionMode === 'proxy'
+                    ? `当前会通过本地代理转发请求，并携带 ${providerDraft.authHeaderType} 形式的 API Key。适合第三方接口的 CORS 场景。`
+                    : `当前会由浏览器直接请求上游接口，并携带 ${providerDraft.authHeaderType} 形式的 API Key。`}
+              </p>
+              {providerTestMessage && (
+                <div className={`text-[10px] whitespace-pre-wrap ${providerTestStatus === 'success' ? 'text-[var(--success-text)]' : 'text-[var(--error-text)]'}`}>
+                  {providerTestMessage}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleTestProvider}
+                  disabled={isTestingProvider}
+                  className="px-4 py-2 bg-[var(--bg-hover)] text-[var(--text-secondary)] text-xs rounded hover:bg-[var(--border-secondary)] transition-colors disabled:opacity-50"
+                >
+                  {isTestingProvider ? '测试中...' : '连接测试'}
+                </button>
+                <button
+                  onClick={saveProviderDraft}
+                  className="flex-1 py-2 bg-[var(--accent)] text-[var(--text-primary)] text-xs font-bold rounded hover:bg-[var(--accent-hover)] transition-colors flex items-center justify-center gap-1"
+                >
+                  <Check className="w-3 h-3" />
+                  保存提供商
+                </button>
+                <button
+                  onClick={cancelProviderEdit}
+                  className="px-4 py-2 bg-[var(--bg-hover)] text-[var(--text-tertiary)] text-xs rounded hover:bg-[var(--border-secondary)] transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {providers.map((provider) => (
+            <div key={provider.id} className="bg-[var(--bg-elevated)]/50 border border-[var(--border-primary)] rounded-lg p-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-[var(--text-primary)]">{provider.name}</span>
+                  {provider.isBuiltIn && <span className="px-1.5 py-0.5 bg-[var(--border-secondary)] text-[var(--text-tertiary)] text-[10px] rounded">内置</span>}
+                  {!provider.isBuiltIn && <span className="px-1.5 py-0.5 bg-[var(--accent-bg)] text-[var(--accent-text)] text-[10px] rounded">自定义</span>}
+                </div>
+                <p className="text-[10px] text-[var(--text-tertiary)] font-mono">{provider.baseUrl}</p>
+                <p className="text-[10px] text-[var(--text-muted)]">协议：{provider.protocol} · 鉴权：{provider.authMode === 'none' ? '无' : 'API Key'} · 连接：{provider.connectionMode === 'proxy' ? '代理' : '直连'}</p>
+              </div>
+              {!provider.isBuiltIn && (
+                <button
+                  onClick={() => startEditProvider(provider)}
+                  className="p-2 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors"
+                  title="编辑提供商"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

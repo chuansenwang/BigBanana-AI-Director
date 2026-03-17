@@ -2,6 +2,7 @@ import path from 'path';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createNewApiProxyHandler } from './server/newApiProxyCore.mjs';
+import { createModelProxyHandler } from './server/modelProxyCore.mjs';
 
 const createDevMediaProxyPlugin = (): Plugin => ({
   name: 'dev-media-proxy',
@@ -86,6 +87,17 @@ const createDevNewApiProxyPlugin = (): Plugin => ({
   },
 });
 
+const createDevModelProxyPlugin = (): Plugin => ({
+  name: 'dev-model-proxy',
+  configureServer(server) {
+    const handler = createModelProxyHandler();
+    server.middlewares.use(async (req, res, next) => {
+      const handled = await handler(req, res);
+      if (!handled) next();
+    });
+  },
+});
+
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
@@ -93,7 +105,7 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
       },
-      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin()],
+      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin(), createDevModelProxyPlugin()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.ANTSK_API_KEY),
         'process.env.ANTSK_API_KEY': JSON.stringify(env.ANTSK_API_KEY)

@@ -4,16 +4,24 @@ const DEFAULT_GEMINI_IMAGE_ENDPOINT_TEMPLATE = '/v1beta/models/{model}:generateC
 const DEFAULT_OPENAI_IMAGE_ENDPOINT = '/v1/images/generations';
 
 export const getImageApiFormat = (
-  model?: Partial<ImageModelDefinition> | null
+  model?: Partial<ImageModelDefinition> | null,
+  providerProtocol?: string
 ): ImageApiFormat => {
+  const endpoint = (model?.endpoint || '').toLowerCase();
+  if (endpoint.includes(':generatecontent') || endpoint.includes('/generatecontent')) {
+    return 'gemini';
+  }
+  if (endpoint.includes('/images/generations') || endpoint.includes('/images/edits')) {
+    return 'openai';
+  }
+
+  if (providerProtocol === 'gemini') {
+    return 'gemini';
+  }
+
   const explicitFormat = model?.params?.apiFormat;
   if (explicitFormat === 'gemini' || explicitFormat === 'openai') {
     return explicitFormat;
-  }
-
-  const endpoint = (model?.endpoint || '').toLowerCase();
-  if (endpoint.includes('/images/generations') || endpoint.includes('/images/edits')) {
-    return 'openai';
   }
 
   const identity = `${model?.id || ''} ${model?.apiModel || ''} ${model?.name || ''}`.toLowerCase();

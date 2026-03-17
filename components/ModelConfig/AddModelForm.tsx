@@ -8,6 +8,11 @@ import { Check, X } from 'lucide-react';
 import { 
   ModelType, 
   ModelDefinition,
+  ProviderAuthHeaderType,
+  ProviderAuthMode,
+  ProviderConnectionMode,
+  ModelProvider,
+  ProviderProtocol,
   ImageApiFormat,
   AudioOutputFormat,
   ChatModelParams,
@@ -24,6 +29,8 @@ import {
 } from '../../types/model';
 import { getProviders, addProvider } from '../../services/modelRegistry';
 import { useAlert } from '../GlobalAlert';
+import { CUSTOM_PROVIDER_PROTOCOLS, getDefaultEndpointForProtocol, isProtocolSupportedForType } from '../../services/modelProtocolService';
+import { validateCustomModelDraft, validateProviderDraft } from '../../services/modelValidationService';
 
 interface AddModelFormProps {
   type: ModelType;
@@ -51,6 +58,13 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
   const [customProviderName, setCustomProviderName] = useState('');
   const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
   const [customProviderApiKey, setCustomProviderApiKey] = useState('');
+  const [customProviderProtocol, setCustomProviderProtocol] = useState<ProviderProtocol>('openai');
+  const [customProviderAuthMode, setCustomProviderAuthMode] = useState<ProviderAuthMode>('required');
+  const [customProviderConnectionMode, setCustomProviderConnectionMode] = useState<ProviderConnectionMode>('proxy');
+  const [customProviderAuthHeaderType, setCustomProviderAuthHeaderType] = useState<ProviderAuthHeaderType>('authorization-bearer');
+
+  const availableProviders = existingProviders.filter((provider) => isProtocolSupportedForType(provider.protocol, type));
+  const selectedProvider = availableProviders.find((provider) => provider.id === selectedProviderId) || availableProviders[0];
   
   useEffect(() => {
     if (type !== 'video' || providerMode !== 'existing' || videoMode !== 'task') return;
@@ -62,6 +76,27 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
     }
   }, [type, videoMode, providerMode]);
 
+  useEffect(() => {
+    if (providerMode !== 'existing') return;
+    if (!selectedProvider && availableProviders[0]) {
+      setSelectedProviderId(availableProviders[0].id);
+    }
+  }, [providerMode, selectedProviderId, availableProviders, selectedProvider]);
+
+  useEffect(() => {
+    const currentProtocol = providerMode === 'custom'
+      ? customProviderProtocol
+      : (selectedProvider?.protocol || 'openai');
+
+    if (type === 'image') {
+      setImageApiFormat(currentProtocol === 'gemini' ? 'gemini' : 'openai');
+    }
+
+    if (type === 'video' && currentProtocol !== 'volcengine-task' && videoMode === 'task') {
+      setVideoMode('async');
+    }
+  }, [providerMode, customProviderProtocol, selectedProvider?.protocol, type, videoMode]);
+
   const handleSave = () => {
     if (!name.trim() || !apiModel.trim()) {
       showAlert('请填写模型名称和 API 模型名', { type: 'warning' });
@@ -70,21 +105,37 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
 
     // 处理提供商
     let providerId = selectedProviderId;
+    let provider: ModelProvider | undefined = selectedProvider;
     
     if (providerMode === 'custom') {
-      if (!customProviderName.trim() || !customProviderBaseUrl.trim()) {
-        showAlert('请填写自定义提供商名称和 API 基础 URL', { type: 'warning' });
+      const providerValidation = validateProviderDraft({
+        name: customProviderName,
+        baseUrl: customProviderBaseUrl,
+        protocol: customProviderProtocol,
+        authMode: customProviderAuthMode,
+        connectionMode: customProviderConnectionMode,
+        authHeaderType: customProviderAuthHeaderType,
+      });
+      if (!providerValidation.valid) {
+        showAlert(providerValidation.errors.join('\n'), { type: 'warning' });
         return;
       }
       const sanitizedBaseUrl = customProviderBaseUrl.trim().replace(/\/+$/, '');
-      // 创建新提供商（包含 API Key）
       const newProvider = addProvider({
         name: customProviderName.trim(),
         baseUrl: sanitizedBaseUrl,
+        protocol: customProviderProtocol,
+        authMode: customProviderAuthMode,
+        connectionMode: customProviderConnectionMode,
+        authHeaderType: customProviderAuthHeaderType,
         apiKey: customProviderApiKey.trim() || undefined,
         isDefault: false,
       });
       providerId = newProvider.id;
+      provider = newProvider;
+    } else if (!provider) {
+      showAlert('当前没有可用的提供商，请先添加支持该模型类型的提供商', { type: 'warning' });
+      return;
     }
 
     // 根据模型类型设置默认参数
@@ -93,17 +144,14 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
     
     if (type === 'chat') {
       params = { ...DEFAULT_CHAT_PARAMS };
-      if (!resolvedEndpoint) resolvedEndpoint = '/v1/chat/completions';
+      if (!resolvedEndpoint) resolvedEndpoint = getDefaultEndpointForProtocol(provider?.protocol || 'openai', 'chat') || '/v1/chat/completions';
     } else if (type === 'image') {
       params =
         imageApiFormat === 'openai'
           ? { ...DEFAULT_IMAGE_PARAMS_OPENAI }
           : { ...DEFAULT_IMAGE_PARAMS };
       if (!resolvedEndpoint) {
-        resolvedEndpoint =
-          imageApiFormat === 'openai'
-            ? '/v1/images/generations'
-            : '/v1beta/models/{model}:generateContent';
+        resolvedEndpoint = getDefaultEndpointForProtocol(provider?.protocol || 'openai', 'image');
       }
     } else if (type === 'video') {
       params =
@@ -128,8 +176,22 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
         outputFormat: audioOutputFormat,
       };
       if (!resolvedEndpoint) {
-        resolvedEndpoint = '/v1/chat/completions';
+        resolvedEndpoint = getDefaultEndpointForProtocol(provider?.protocol || 'openai', 'audio') || '/v1/chat/completions';
       }
+    }
+
+    const validation = validateCustomModelDraft({
+      name,
+      apiModel,
+      type,
+      provider,
+      endpoint: resolvedEndpoint,
+      params,
+    });
+
+    if (!validation.valid) {
+      showAlert(validation.errors.join('\n'), { type: 'warning' });
+      return;
     }
 
     const model: Omit<ModelDefinition, 'id' | 'isBuiltIn'> = {
@@ -322,11 +384,17 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
             onChange={(e) => setSelectedProviderId(e.target.value)}
             className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)]"
           >
-            {existingProviders.map((p) => (
+            {availableProviders.map((p) => (
               <option key={p.id} value={p.id}>{p.name} ({p.baseUrl})</option>
             ))}
           </select>
-        ) : (
+        ) : null}
+
+        {providerMode === 'existing' && !availableProviders.length ? (
+          <p className="text-[10px] text-[var(--warning-text)]">
+            当前没有支持该模型类型的提供商，请切换为“添加新提供商”。
+          </p>
+        ) : providerMode === 'custom' ? (
           <div className="space-y-3">
             <div>
               <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">提供商名称 *</label>
@@ -349,20 +417,131 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
               />
             </div>
             <div>
-              <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">提供商 API Key *</label>
+              <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">提供商协议 *</label>
+              <div className="grid grid-cols-2 gap-2">
+                {CUSTOM_PROVIDER_PROTOCOLS.map((protocol) => (
+                  <button
+                    key={protocol}
+                    onClick={() => setCustomProviderProtocol(protocol)}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      customProviderProtocol === protocol
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    {protocol === 'openai' ? 'OpenAI-compatible' : 'Gemini-style'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">鉴权方式 *</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setCustomProviderAuthMode('required')}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    customProviderAuthMode === 'required'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  需要 API Key
+                </button>
+                <button
+                  onClick={() => setCustomProviderAuthMode('none')}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    customProviderAuthMode === 'none'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  无需鉴权
+                </button>
+              </div>
+              {customProviderAuthMode === 'required' && (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <button
+                    onClick={() => setCustomProviderAuthHeaderType('authorization-bearer')}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      customProviderAuthHeaderType === 'authorization-bearer'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    Bearer
+                  </button>
+                  <button
+                    onClick={() => setCustomProviderAuthHeaderType('x-api-key')}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      customProviderAuthHeaderType === 'x-api-key'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    x-api-key
+                  </button>
+                  <button
+                    onClick={() => setCustomProviderAuthHeaderType('x-goog-api-key')}
+                    className={`py-2 text-xs rounded transition-colors ${
+                      customProviderAuthHeaderType === 'x-goog-api-key'
+                        ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                        : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                    }`}
+                  >
+                    x-goog-api-key
+                  </button>
+                </div>
+              )}
+            </div>
+            <div>
+              <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">连接方式 *</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setCustomProviderConnectionMode('direct')}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    customProviderConnectionMode === 'direct'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  浏览器直连
+                </button>
+                <button
+                  onClick={() => setCustomProviderConnectionMode('proxy')}
+                  className={`py-2 text-xs rounded transition-colors ${
+                    customProviderConnectionMode === 'proxy'
+                      ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                      : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                  }`}
+                >
+                  本地代理
+                </button>
+              </div>
+              <p className="text-[9px] text-[var(--text-muted)] mt-1 leading-relaxed">
+                自定义 provider 默认推荐使用本地代理，能绕过大多数第三方接口的浏览器跨域限制。
+              </p>
+            </div>
+            <div>
+              <label className="text-[10px] text-[var(--text-tertiary)] block mb-1">提供商 API Key</label>
               <input
                 type="password"
                 value={customProviderApiKey}
                 onChange={(e) => setCustomProviderApiKey(e.target.value)}
-                placeholder="输入此提供商的 API Key"
+                placeholder={customProviderAuthMode === 'none' ? '该提供商无需 API Key' : '输入此提供商的 API Key'}
                 className="w-full bg-[var(--bg-hover)] border border-[var(--border-secondary)] rounded px-3 py-2 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] font-mono"
               />
               <p className="text-[9px] text-[var(--text-muted)] mt-1">
-                此 API Key 会用于该提供商下的所有模型
+                {customProviderAuthMode === 'none'
+                  ? customProviderConnectionMode === 'proxy'
+                    ? '该提供商会通过本地代理转发请求，但不会附带 Authorization 头。若上游返回 401，请改成“需要 API Key”。'
+                    : '该提供商会在浏览器直连时省略 Authorization 头；若接口存在 CORS 或鉴权要求，请改用代理或启用 API Key。'
+                  : customProviderConnectionMode === 'proxy'
+                    ? `此 API Key 会用于该提供商下的所有模型，并由本地代理通过 ${customProviderAuthHeaderType} 请求头附带到上游请求中。`
+                    : `此 API Key 会用于该提供商下的所有模型，并由浏览器直连通过 ${customProviderAuthHeaderType} 请求头附带。`}
               </p>
             </div>
           </div>
-        )}
+        ) : null}
       </div>
 
       {/* 视频模型特有选项 */}
@@ -390,16 +569,18 @@ const AddModelForm: React.FC<AddModelFormProps> = ({ type, onSave, onCancel }) =
             >
               异步模式（Sora 类）
             </button>
-            <button
-              onClick={() => setVideoMode('task')}
-              className={`flex-1 py-2 text-xs rounded transition-colors ${
-                videoMode === 'task'
-                  ? 'bg-[var(--accent)] text-[var(--text-primary)]'
-                  : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
-              }`}
-            >
-              异步模式（火山任务类）
-            </button>
+            {(providerMode === 'existing' && selectedProvider?.protocol === 'volcengine-task') && (
+              <button
+                onClick={() => setVideoMode('task')}
+                className={`flex-1 py-2 text-xs rounded transition-colors ${
+                  videoMode === 'task'
+                    ? 'bg-[var(--accent)] text-[var(--text-primary)]'
+                    : 'bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:bg-[var(--border-secondary)]'
+                }`}
+              >
+                异步模式（火山任务类）
+              </button>
+            )}
           </div>
           <p className="text-[9px] text-[var(--text-muted)] mt-1">
             同步模式：直接返回结果；Sora 类异步：`/v1/videos`；火山任务类：`/api/v3/contents/generations/tasks`

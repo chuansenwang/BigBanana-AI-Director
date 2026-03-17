@@ -28,6 +28,9 @@ import {
   resolveOpenAiImageEndpoint,
   mapAspectRatioToOpenAiImageSize,
 } from '../imageModelUtils';
+import { getProviderById } from '../modelRegistry';
+import { buildAuthHeaders } from '../providerAuthService';
+import { callProviderFetch } from '../modelRequestService';
 
 // ============================================
 // 美术指导文档生成
@@ -840,11 +843,13 @@ export const generateImage = async (
   const activeImageModel = getActiveModel('image');
   const imageRoutingFamily = resolveImageModelRoutingFamily(activeImageModel);
   const imageModelId = activeImageModel?.apiModel || activeImageModel?.id || 'gemini-3-pro-image-preview';
-  const imageApiFormat = getImageApiFormat(activeImageModel as any);
+  const imageProvider = getProviderById(activeImageModel?.providerId || '');
+  const imageApiFormat = getImageApiFormat(activeImageModel as any, imageProvider?.protocol);
   const imageModelEndpointTemplate = activeImageModel?.endpoint || getDefaultImageEndpoint(imageApiFormat, imageModelId);
   const imageModelEndpoint = imageModelEndpointTemplate.replace('{model}', imageModelId);
   const apiKey = checkApiKey('image', activeImageModel?.id);
   const apiBase = getApiBase('image', activeImageModel?.id);
+  const authHeaders = buildAuthHeaders(imageProvider, apiKey);
 
   try {
     const normalizedUserPrompt = normalizePromptWhitespace(prompt);
@@ -1043,14 +1048,15 @@ NEGATIVE PROMPT (strictly avoid): ${compactNegativePrompt}`;
           formData.append('n', '1');
           files.forEach(file => formData.append('image[]', file));
 
-          res = await fetch(`${apiBase}${openAiEndpoint}`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${apiKey}`,
+        res = await callProviderFetch(`${apiBase}${openAiEndpoint}`, {
+          method: 'POST',
+          providerId: activeImageModel?.providerId,
+          headers: {
+              ...authHeaders,
               'Accept': '*/*'
             },
-            body: formData
-          });
+          body: formData
+        });
         } else {
           const requestBody = {
             model: imageModelId,
@@ -1062,15 +1068,16 @@ NEGATIVE PROMPT (strictly avoid): ${compactNegativePrompt}`;
             n: 1,
           };
 
-          res = await fetch(`${apiBase}${openAiEndpoint}`, {
-            method: 'POST',
-            headers: {
+        res = await callProviderFetch(`${apiBase}${openAiEndpoint}`, {
+          method: 'POST',
+          providerId: activeImageModel?.providerId,
+          headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${apiKey}`,
+              ...authHeaders,
               'Accept': '*/*'
             },
-            body: JSON.stringify(requestBody)
-          });
+          body: JSON.stringify(requestBody)
+        });
         }
 
         if (!res.ok) {
@@ -1128,11 +1135,12 @@ NEGATIVE PROMPT (strictly avoid): ${compactNegativePrompt}`;
     };
 
     const response = await retryOperation(async () => {
-      const res = await fetch(`${apiBase}${imageModelEndpoint}`, {
+      const res = await callProviderFetch(`${apiBase}${imageModelEndpoint}`, {
         method: 'POST',
+        providerId: activeImageModel?.providerId,
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+          ...authHeaders,
           'Accept': '*/*'
         },
         body: JSON.stringify(requestBody)

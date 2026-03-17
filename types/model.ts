@@ -13,6 +13,18 @@
 export type ModelType = 'chat' | 'image' | 'video' | 'audio';
 
 /**
+ * Provider protocol family.
+ * - openai: OpenAI-compatible REST shapes
+ * - gemini: Google Gemini generateContent-style requests
+ * - volcengine-task: Volcengine async task API (built-in compatibility only)
+ */
+export type ProviderProtocol = 'openai' | 'gemini' | 'volcengine-task';
+
+export type ProviderAuthMode = 'required' | 'none';
+export type ProviderConnectionMode = 'direct' | 'proxy';
+export type ProviderAuthHeaderType = 'authorization-bearer' | 'x-api-key' | 'x-goog-api-key';
+
+/**
  * 横竖屏比例类型
  */
 export type AspectRatio = '16:9' | '9:16' | '1:1';
@@ -159,6 +171,10 @@ export interface ModelProvider {
   id: string;                    // 唯一标识
   name: string;                  // 显示名称
   baseUrl: string;               // API 基础 URL
+  protocol: ProviderProtocol;    // 协议族
+  authMode: ProviderAuthMode;    // 鉴权模式
+  connectionMode: ProviderConnectionMode; // 连接方式
+  authHeaderType: ProviderAuthHeaderType; // 鉴权头类型
   apiKey?: string;               // 独立 API Key（可选）
   isBuiltIn: boolean;            // 是否内置
   isDefault: boolean;            // 是否为默认提供商
@@ -559,6 +575,10 @@ export const BUILTIN_PROVIDERS: ModelProvider[] = [
     id: 'antsk',
     name: 'BigBanana API (api.antsk.cn)',
     baseUrl: 'https://api.antsk.cn',
+    protocol: 'openai',
+    authMode: 'required',
+    connectionMode: 'direct',
+    authHeaderType: 'authorization-bearer',
     isBuiltIn: true,
     isDefault: true,
   },
@@ -566,6 +586,10 @@ export const BUILTIN_PROVIDERS: ModelProvider[] = [
     id: 'volcengine',
     name: 'Volcengine Ark',
     baseUrl: 'https://ark.cn-beijing.volces.com',
+    protocol: 'volcengine-task',
+    authMode: 'required',
+    connectionMode: 'direct',
+    authHeaderType: 'authorization-bearer',
     isBuiltIn: true,
     isDefault: false,
   },
