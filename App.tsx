@@ -6,6 +6,7 @@ import StageAssets from './components/StageAssets';
 import StageDirector from './components/StageDirector';
 import StageExport from './components/StageExport';
 import StagePrompts from './components/StagePrompts';
+import StageAnalysis from './components/StageAnalysis';
 import Dashboard from './components/Dashboard';
 import ProjectOverview from './components/ProjectOverview';
 import CharacterLibraryPage from './components/CharacterLibrary';
@@ -59,6 +60,13 @@ const clearInFlightGenerationStates = (episode: ProjectState): ProjectState => {
     isParsingScript: false,
     scriptGenerationCheckpoint: null,
     scriptData,
+    analysisData: episode.analysisData
+      ? {
+          ...episode.analysisData,
+          status: episode.analysisData.status === 'analyzing' ? 'failed' : episode.analysisData.status,
+          updatedAt: Date.now(),
+        }
+      : episode.analysisData,
     shots: episode.shots.map(shot => ({
       ...shot,
       keyframes: shot.keyframes?.map(kf => (
@@ -189,7 +197,7 @@ function EpisodeWorkspace() {
     updateEpisode(updates);
   };
 
-  const setStage = (stage: 'script' | 'assets' | 'director' | 'export' | 'prompts') => {
+  const setStage = (stage: 'script' | 'assets' | 'director' | 'export' | 'prompts' | 'analysis') => {
     if (isGenerating) {
       showAlert('当前正在执行生成任务，切换页面会导致生成数据丢失。\n\n确定要离开当前页面吗？', {
         title: '生成任务进行中', type: 'warning', showCancel: true, confirmText: '确定离开', cancelText: '继续等待',
@@ -238,6 +246,8 @@ function EpisodeWorkspace() {
         return <StageExport project={currentEpisode} />;
       case 'prompts':
         return <StagePrompts project={currentEpisode} updateProject={handleUpdateProject} />;
+      case 'analysis':
+        return <StageAnalysis project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} />;
       default:
         return <div className="text-[var(--text-primary)]">未知阶段</div>;
     }

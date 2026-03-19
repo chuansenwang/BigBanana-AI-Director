@@ -1,0 +1,10 @@
+T13 Validation QA
+
+- Watch/share URL rejection verified via analysisIngestionService:
+  - https://youtube.com/shorts/7YYiSWSc97M?si=0jleGXH6sJSrT7py
+  - message: 暂不支持 YouTube/TikTok 页面链接，请提供可直接访问的视频文件地址。
+- Simulated storage quota fallback verified via localStorage switch:
+  - key: bb.analysis.simulateStorageFailure=1
+  - upload status remained ready
+  - warning surfaced: 本地存储空间不足，无法稳定持久化视频。请清理浏览器站点存储或改用更小的文件。
+  - persisted ref fell back to data:video...

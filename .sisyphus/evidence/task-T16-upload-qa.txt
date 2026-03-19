@@ -1,0 +1,11 @@
+T16 Upload QA
+
+- Upload path exercised via service-backed browser QA using File upload fixture
+- Upload source persisted as ready
+- Analysis run completed and produced 3 shots
+- Edited transcript text persisted after reload
+- Draft creation navigated to a new episode and wrote downstream data
+- Derived episode state verified in IndexedDB:
+  - title: upload-fixture.mp4 - 派生草稿
+  - stage: script
+  - shotCount: 3

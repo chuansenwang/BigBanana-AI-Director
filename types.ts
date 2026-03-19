@@ -387,6 +387,7 @@ export interface SeriesProject {
   characterLibrary: Character[];
   sceneLibrary: Scene[];
   propLibrary: Prop[];
+  viralTemplateLibrary?: ViralTemplateRecord[];
 }
 
 export interface Series {
@@ -421,6 +422,152 @@ export interface EpisodePropRef {
 
 export type ScriptGenerationStep = 'structure' | 'visuals' | 'shots';
 
+export type AnalysisInputKind = 'url' | 'upload';
+export type AnalysisLineSource = 'subtitle' | 'ocr' | 'stt' | 'merged';
+export type ViralSignalCategory = 'hook' | 'shot' | 'script' | 'rhythm' | 'emotion' | 'cta';
+
+export interface VideoAnalysisSource {
+  id: string;
+  kind: AnalysisInputKind;
+  title?: string;
+  originalUrl?: string;
+  persistedVideoRef?: string;
+  mimeType?: string;
+  fileName?: string;
+  durationMs?: number;
+  thumbnailUrl?: string;
+  status: 'idle' | 'ingesting' | 'ready' | 'failed';
+  error?: string;
+}
+
+export interface AnalysisShotSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+  title?: string;
+  summary: string;
+  scriptSnippet?: string;
+  visualNotes?: string;
+  viralElements: string[];
+  confidence?: number;
+}
+
+export interface AnalysisTranscriptLine {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  source: AnalysisLineSource;
+  speaker?: string;
+}
+
+export interface AnalysisTranscriptArtifact {
+  language?: string;
+  mergedScript: string;
+  summary: string;
+  lines: AnalysisTranscriptLine[];
+}
+
+export interface ViralScoreFactor {
+  id: string;
+  label: string;
+  score: number;
+  weight: number;
+  explanation: string;
+}
+
+export interface ViralScoreCard {
+  overall: number;
+  rationale: string;
+  version: string;
+  factors: ViralScoreFactor[];
+}
+
+export interface ViralSignal {
+  id: string;
+  category: ViralSignalCategory;
+  label: string;
+  evidence: string;
+  score?: number;
+  shotId?: string;
+  startMs?: number;
+  endMs?: number;
+}
+
+export interface AnalysisReviewState {
+  status: 'draft' | 'reviewed' | 'applied';
+  userEdited: boolean;
+  lastReviewedAt?: number;
+  notes?: string;
+  dirtyFields: string[];
+}
+
+export interface AnalysisDerivedDraftPayload {
+  title: string;
+  draftEpisodeId?: string;
+  rawScript: string;
+  summary?: string;
+  mappedShotIds: string[];
+  shotCount: number;
+}
+
+export interface AnalysisApplyHistoryEntry {
+  id: string;
+  createdAt: number;
+  target: 'script' | 'director' | 'script+director';
+  summary: string;
+  draftEpisodeId?: string;
+  draftEpisodeTitle?: string;
+  templateIds: string[];
+}
+
+export interface VideoAnalysisRecord {
+  source: VideoAnalysisSource | null;
+  status: 'idle' | 'ready' | 'analyzing' | 'completed' | 'failed';
+  createdAt?: number;
+  updatedAt?: number;
+  rawResponse?: string | null;
+  shots: AnalysisShotSegment[];
+  transcript: AnalysisTranscriptArtifact | null;
+  viralSignals: ViralSignal[];
+  score: ViralScoreCard | null;
+  review: AnalysisReviewState;
+  derivedDraft: AnalysisDerivedDraftPayload | null;
+  templateCandidates: ViralTemplateRecord[];
+  applyHistory: AnalysisApplyHistoryEntry[];
+}
+
+export type ViralTemplateType = 'video' | 'hook' | 'shot' | 'script' | 'rhythm' | 'emotion';
+
+export interface ViralTemplateSourceTrace {
+  projectId: string;
+  episodeId: string;
+  analysisSourceId?: string;
+  sourceTitle?: string;
+  sourceUrl?: string;
+  shotId?: string;
+  startMs?: number;
+  endMs?: number;
+}
+
+export interface ViralTemplatePayload {
+  summary: string;
+  cues: string[];
+  tags: string[];
+}
+
+export interface ViralTemplateRecord {
+  id: string;
+  type: ViralTemplateType;
+  title: string;
+  description: string;
+  score?: number;
+  createdAt: number;
+  updatedAt: number;
+  source: ViralTemplateSourceTrace;
+  payload: ViralTemplatePayload;
+}
+
 export interface ScriptGenerationCheckpoint {
   // Next step to execute in the analyze pipeline.
   step: ScriptGenerationStep;
@@ -439,7 +586,7 @@ export interface Episode {
   title: string;
   createdAt: number;
   lastModified: number;
-  stage: 'script' | 'assets' | 'director' | 'export' | 'prompts';
+  stage: 'script' | 'assets' | 'director' | 'export' | 'prompts' | 'analysis';
   rawScript: string;
   targetDuration: string;
   language: string;
@@ -452,6 +599,7 @@ export interface Episode {
   characterRefs: EpisodeCharacterRef[];
   sceneRefs: EpisodeSceneRef[];
   propRefs: EpisodePropRef[];
+  analysisData?: VideoAnalysisRecord | null;
   promptTemplateOverrides?: PromptTemplateOverrides;
   scriptGenerationCheckpoint?: ScriptGenerationCheckpoint | null;
 }
@@ -532,4 +680,65 @@ export interface ModelManagerState {
   currentConfig: ModelConfig;
   defaultAspectRatio: AspectRatio;
   defaultVideoDuration: VideoDuration;
+}
+
+// ============================================
+// 对标视频库相关类型定义
+// ============================================
+
+export interface BenchmarkShotResult {
+  id: number;
+  time: string;
+  desc: string;
+  videoClip?: string;
+  videoPrompt?: string;
+  firstFrame?: string;
+  firstFramePrompt?: string;
+  lastFrame?: string;
+  lastFramePrompt?: string;
+  adjustment?: string;
+}
+
+export interface BenchmarkMetrics {
+  t0_playCount: string;
+  t0_storyScript: string;
+  t0_viralFactors: string;
+  t0_homogenization: string;
+
+  t1_first3sContent: string;
+  t1_first3sVisuals: string;
+  t1_duration: string;
+  t1_shotCount: string;
+  t1_shotDuration: string;
+  t1_pacing: string;
+  t1_mainSubject: string;
+  t1_twistCount: string;
+
+  t2_music: string;
+  t2_soundEffects: string;
+  t2_voiceOver: string;
+  t2_artStyle: string;
+  t2_visualBrightness: string;
+  t2_motionMagnitude: string;
+  t2_expressionLiveliness: string;
+  t2_clarity: string;
+  t2_interactionGuide: string;
+  t2_errors: string;
+  t2_demographics: string;
+  t2_transitions: string;
+
+  t3_subjectiveInterest: string;
+  t3_publishTime: string;
+  t3_customMetrics: string;
+}
+
+export interface BenchmarkVideo {
+  id: string;
+  url: string;
+  title: string;
+  createdAt: number;
+  lastModified: number;
+  status: 'draft' | 'analyzing' | 'completed' | 'failed';
+  deconstructResult: BenchmarkShotResult[] | null;
+  metrics?: BenchmarkMetrics;
 }

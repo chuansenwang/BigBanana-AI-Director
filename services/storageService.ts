@@ -1,17 +1,67 @@
-import { ProjectState, AssetLibraryItem, SeriesProject, Series, Episode } from '../types';
+import { ProjectState, AssetLibraryItem, SeriesProject, Series, Episode, BenchmarkVideo } from '../types';
 import { runV2ToV3Migration, runEpisodeTitleFixMigration } from './migrationService';
 import { materializeProjectVideosForExport, migrateProjectVideosToOPFS } from './videoStorageService';
 import { reconcileShotSceneIds } from './storyboardIdUtils';
 import { sanitizePromptTemplateOverrides } from './promptTemplateService';
 import { normalizeChatModelId } from './modelIdUtils';
 
+const normalizeAnalysisData = (analysisData?: Episode['analysisData']): Episode['analysisData'] => {
+  if (!analysisData) return null;
+
+  return {
+    source: analysisData.source ?? null,
+    status: analysisData.status ?? 'idle',
+    createdAt: analysisData.createdAt,
+    updatedAt: analysisData.updatedAt,
+    rawResponse: analysisData.rawResponse ?? null,
+    shots: analysisData.shots || [],
+    transcript: analysisData.transcript
+      ? {
+          language: analysisData.transcript.language,
+          mergedScript: analysisData.transcript.mergedScript || '',
+          summary: analysisData.transcript.summary || '',
+          lines: analysisData.transcript.lines || [],
+        }
+      : null,
+    viralSignals: analysisData.viralSignals || [],
+    score: analysisData.score
+      ? {
+          overall: analysisData.score.overall ?? 0,
+          rationale: analysisData.score.rationale || '',
+          version: analysisData.score.version || 'v1',
+          factors: analysisData.score.factors || [],
+        }
+      : null,
+    review: {
+      status: analysisData.review?.status ?? 'draft',
+      userEdited: analysisData.review?.userEdited ?? false,
+      lastReviewedAt: analysisData.review?.lastReviewedAt,
+      notes: analysisData.review?.notes,
+      dirtyFields: analysisData.review?.dirtyFields || [],
+    },
+    derivedDraft: analysisData.derivedDraft
+      ? {
+          title: analysisData.derivedDraft.title || '',
+          draftEpisodeId: analysisData.derivedDraft.draftEpisodeId,
+          rawScript: analysisData.derivedDraft.rawScript || '',
+          summary: analysisData.derivedDraft.summary,
+          mappedShotIds: analysisData.derivedDraft.mappedShotIds || [],
+          shotCount: analysisData.derivedDraft.shotCount ?? 0,
+        }
+      : null,
+    templateCandidates: analysisData.templateCandidates || [],
+    applyHistory: analysisData.applyHistory || [],
+  };
+};
+
 const DB_NAME = 'BigBananaDB';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = 'projects';
 const ASSET_STORE_NAME = 'assetLibrary';
 const SP_STORE = 'seriesProjects';
 const SERIES_STORE = 'series';
 const EP_STORE = 'episodes';
+const BENCHMARK_STORE = 'benchmarkVideos';
 const EXPORT_SCHEMA_VERSION = 3;
 
 export interface IndexedDBExportPayload {
@@ -65,6 +115,9 @@ const openDB = (): Promise<IDBDatabase> => {
         es.createIndex('projectId', 'projectId', { unique: false });
         es.createIndex('seriesId', 'seriesId', { unique: false });
       }
+      if (!db.objectStoreNames.contains(BENCHMARK_STORE)) {
+        db.createObjectStore(BENCHMARK_STORE, { keyPath: 'id' });
+      }
     };
   });
 
@@ -80,6 +133,13 @@ const mergeByKey = <T>(
   inferred.forEach(item => merged.set(getKey(item), item));
   (existing || []).forEach(item => merged.set(getKey(item), item));
   return Array.from(merged.values());
+};
+
+const normalizeSeriesProject = (project: SeriesProject): SeriesProject => {
+  return {
+    ...project,
+    viralTemplateLibrary: project.viralTemplateLibrary || [],
+  };
 };
 
 const normalizeEpisode = (ep: Episode): Episode => {
@@ -122,6 +182,7 @@ const normalizeEpisode = (ep: Episode): Episode => {
     characterRefs: mergeByKey(ep.characterRefs, inferredCharacterRefs, r => r.characterId),
     sceneRefs: mergeByKey(ep.sceneRefs, inferredSceneRefs, r => r.sceneId),
     propRefs: mergeByKey(ep.propRefs, inferredPropRefs, r => r.propId),
+    analysisData: normalizeAnalysisData(ep.analysisData),
     promptTemplateOverrides: sanitizePromptTemplateOverrides(ep.promptTemplateOverrides),
   };
 };
@@ -145,7 +206,7 @@ export const saveSeriesProject = async (sp: SeriesProject): Promise<void> => {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SP_STORE, 'readwrite');
-    tx.objectStore(SP_STORE).put({ ...sp, lastModified: Date.now() });
+    tx.objectStore(SP_STORE).put({ ...normalizeSeriesProject(sp), lastModified: Date.now() });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -157,7 +218,7 @@ export const loadSeriesProject = async (id: string): Promise<SeriesProject> => {
     const tx = db.transaction(SP_STORE, 'readonly');
     const req = tx.objectStore(SP_STORE).get(id);
     req.onsuccess = () => {
-      if (req.result) resolve(req.result as SeriesProject);
+      if (req.result) resolve(normalizeSeriesProject(req.result as SeriesProject));
       else reject(new Error('SeriesProject not found'));
     };
     req.onerror = () => reject(req.error);
@@ -170,7 +231,7 @@ export const getAllSeriesProjects = async (): Promise<SeriesProject[]> => {
     const tx = db.transaction(SP_STORE, 'readonly');
     const req = tx.objectStore(SP_STORE).getAll();
     req.onsuccess = () => {
-      const items = (req.result as SeriesProject[]) || [];
+      const items = ((req.result as SeriesProject[]) || []).map(normalizeSeriesProject);
       items.sort((a, b) => b.lastModified - a.lastModified);
       resolve(items);
     };
@@ -212,6 +273,7 @@ export const createNewSeriesProject = (title?: string): SeriesProject => {
     characterLibrary: [],
     sceneLibrary: [],
     propLibrary: [],
+    viralTemplateLibrary: [],
   };
 };
 
@@ -373,6 +435,7 @@ export const createNewEpisode = (projectId: string, seriesId: string, episodeNum
     characterRefs: [],
     sceneRefs: [],
     propRefs: [],
+    analysisData: null,
     promptTemplateOverrides: undefined,
     scriptGenerationCheckpoint: null,
   };
@@ -634,6 +697,7 @@ export const importIndexedDBData = async (
           characterLibrary: chars.map((c: any) => ({ ...c, version: 1 })),
           sceneLibrary: scenes.map((s: any) => ({ ...s, version: 1 })),
           propLibrary: props.map((pr: any) => ({ ...pr, version: 1 })),
+          viralTemplateLibrary: [],
         };
         spStore.put(sp);
 
@@ -684,5 +748,56 @@ export const convertImageToBase64 = (file: File): Promise<string> => {
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = () => reject(new Error('图片读取失败'));
     reader.readAsDataURL(file);
+  });
+};
+
+// =============================================
+// Benchmark Video Operations
+// =============================================
+
+export const saveBenchmarkVideo = async (video: BenchmarkVideo): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BENCHMARK_STORE, 'readwrite');
+    tx.objectStore(BENCHMARK_STORE).put({ ...video, lastModified: Date.now() });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+export const loadBenchmarkVideo = async (id: string): Promise<BenchmarkVideo> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BENCHMARK_STORE, 'readonly');
+    const req = tx.objectStore(BENCHMARK_STORE).get(id);
+    req.onsuccess = () => {
+      if (req.result) resolve(req.result as BenchmarkVideo);
+      else reject(new Error('BenchmarkVideo not found'));
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
+export const getAllBenchmarkVideos = async (): Promise<BenchmarkVideo[]> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BENCHMARK_STORE, 'readonly');
+    const req = tx.objectStore(BENCHMARK_STORE).getAll();
+    req.onsuccess = () => {
+      const items = (req.result as BenchmarkVideo[]) || [];
+      items.sort((a, b) => b.lastModified - a.lastModified);
+      resolve(items);
+    };
+    req.onerror = () => reject(req.error);
+  });
+};
+
+export const deleteBenchmarkVideo = async (id: string): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BENCHMARK_STORE, 'readwrite');
+    tx.objectStore(BENCHMARK_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 };

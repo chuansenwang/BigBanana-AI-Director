@@ -10,6 +10,12 @@ interface PersistVideoOptions {
   shotId?: string;
 }
 
+export interface PersistVideoResult {
+  value: string;
+  fallbackReason?: 'opfs-unsupported' | 'persistence-failed' | 'storage-quota';
+  message?: string;
+}
+
 interface ResolvePlaybackResult {
   src: string;
   revoke?: () => void;
@@ -18,6 +24,33 @@ interface ResolvePlaybackResult {
 const getStorageManager = (): (StorageManager & { getDirectory?: () => Promise<FileSystemDirectoryHandle> }) | null => {
   if (typeof navigator === 'undefined' || !navigator.storage) return null;
   return navigator.storage as StorageManager & { getDirectory?: () => Promise<FileSystemDirectoryHandle> };
+};
+
+const shouldSimulateStorageFailure = (): boolean => {
+  if (typeof globalThis === 'undefined' || !('localStorage' in globalThis)) return false;
+  try {
+    return globalThis.localStorage.getItem('bb.analysis.simulateStorageFailure') === '1';
+  } catch {
+    return false;
+  }
+};
+
+const describePersistError = (error: unknown): Pick<PersistVideoResult, 'fallbackReason' | 'message'> => {
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const normalized = rawMessage.toLowerCase();
+  const errorName = error && typeof error === 'object' && 'name' in error ? String((error as { name?: unknown }).name || '') : '';
+
+  if (errorName === 'QuotaExceededError' || normalized.includes('quota') || normalized.includes('space') || normalized.includes('storage')) {
+    return {
+      fallbackReason: 'storage-quota',
+      message: '本地存储空间不足，无法稳定持久化视频。请清理浏览器站点存储或改用更小的文件。',
+    };
+  }
+
+  return {
+    fallbackReason: 'persistence-failed',
+    message: '视频本地持久化失败，当前将回退到临时引用。刷新页面后可能需要重新接入。',
+  };
 };
 
 const sanitizeSegment = (value?: string): string => {
@@ -86,7 +119,7 @@ export const dataUrlToBlob = (dataUrl: string): Blob => {
   return new Blob([bytes], { type: mimeType });
 };
 
-const blobToDataUrl = (blob: Blob): Promise<string> => {
+export const blobToDataUrl = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result as string);
@@ -122,6 +155,47 @@ const blobToOpfsRef = async (blob: Blob, options?: PersistVideoOptions): Promise
   return `${OPFS_VIDEO_PREFIX}${encodeURIComponent(fileName)}`;
 };
 
+export const persistVideoBlobWithStatus = async (
+  blob: Blob,
+  options?: PersistVideoOptions
+): Promise<PersistVideoResult> => {
+  if (!blob) {
+    throw new Error('Video blob is empty.');
+  }
+
+  if (!supportsOPFSVideoStorage()) {
+    return {
+      value: await blobToDataUrl(blob),
+      fallbackReason: 'opfs-unsupported',
+      message: '当前浏览器不支持 OPFS，本地上传将以 data URL 形式保存。',
+    };
+  }
+
+  try {
+    if (shouldSimulateStorageFailure()) {
+      const simulated = new Error('Simulated storage quota exceeded.');
+      simulated.name = 'QuotaExceededError';
+      throw simulated;
+    }
+
+    return { value: await blobToOpfsRef(blob, options) };
+  } catch (error) {
+    console.warn('Persist uploaded video to OPFS failed, fallback to data URL.', error);
+    return {
+      value: await blobToDataUrl(blob),
+      ...describePersistError(error),
+    };
+  }
+};
+
+export const persistVideoBlob = async (
+  blob: Blob,
+  options?: PersistVideoOptions
+): Promise<string> => {
+  const result = await persistVideoBlobWithStatus(blob, options);
+  return result.value;
+};
+
 const fetchBlobFromUrl = async (url: string): Promise<Blob> => {
   const response = await fetchMediaWithCorsFallback(url);
   if (!response.ok) {
@@ -138,33 +212,54 @@ const readBlobFromOpfsRef = async (ref: string): Promise<Blob> => {
   return new Blob([file], { type: file.type || 'video/mp4' });
 };
 
-export const persistVideoReference = async (
+export const persistVideoReferenceWithStatus = async (
   value: string,
   options?: PersistVideoOptions
-): Promise<string> => {
+): Promise<PersistVideoResult> => {
   if (!value || isOpfsVideoRef(value) || !supportsOPFSVideoStorage()) {
-    return value;
+    return {
+      value,
+      fallbackReason: supportsOPFSVideoStorage() ? undefined : 'opfs-unsupported',
+      message: supportsOPFSVideoStorage() ? undefined : '当前浏览器不支持 OPFS，远程直链将直接引用原地址。',
+    };
   }
 
   try {
+    if (shouldSimulateStorageFailure()) {
+      const simulated = new Error('Simulated storage quota exceeded.');
+      simulated.name = 'QuotaExceededError';
+      throw simulated;
+    }
+
     let blob: Blob;
     if (isVideoDataUrl(value)) {
       blob = dataUrlToBlob(value);
     } else if (/^https?:\/\//i.test(value) || value.startsWith('blob:')) {
       blob = await fetchBlobFromUrl(value);
     } else {
-      return value;
+      return { value };
     }
 
     const opfsRef = await blobToOpfsRef(blob, options);
     if (value.startsWith('blob:')) {
       URL.revokeObjectURL(value);
     }
-    return opfsRef;
+    return { value: opfsRef };
   } catch (error) {
     console.warn('Persist video to OPFS failed, fallback to original value.', error);
-    return value;
+    return {
+      value,
+      ...describePersistError(error),
+    };
   }
+};
+
+export const persistVideoReference = async (
+  value: string,
+  options?: PersistVideoOptions
+): Promise<string> => {
+  const result = await persistVideoReferenceWithStatus(value, options);
+  return result.value;
 };
 
 export const resolveVideoToBlob = async (value: string): Promise<Blob> => {

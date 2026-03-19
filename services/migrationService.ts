@@ -125,6 +125,7 @@ export async function runV2ToV3Migration(db: IDBDatabase): Promise<void> {
         characterLibrary: libraryChars,
         sceneLibrary: libraryScenes,
         propLibrary: libraryProps,
+        viralTemplateLibrary: [],
       };
 
       const s: Series = {

@@ -1,10 +1,32 @@
 {
-  "active_plan": "F:\\aigc\\BigBanana-AI-Director\\.sisyphus\\plans\\custom-model-settings.md",
-  "started_at": "2026-03-16T14:22:19.730Z",
+  "active_plan": "F:\\aigc\\BigBanana-AI-Director\\.sisyphus\\plans\\homepage-left-nav-layout.md",
+  "started_at": "2026-03-18T07:45:38.812Z",
   "session_ids": [
-    "ses_30a0b036bffe13E3YM08CLjXUU"
+    "ses_30084d281ffeAGz9XlM0b2FQtj",
+    "ses_30013ef33ffegMFgLVgTYg6Yfw",
+    "ses_30014b3d5ffeXqjjHAqopbH35J",
+    "ses_30015abc7ffeWpucHTlbSWV4uY",
+    "ses_3000404b7ffeL0EomlOAp10X2S",
+    "ses_2ffe7e00fffeVGrCpIM5liKNcM",
+    "ses_2ffcbbff4ffeTOhi8WE4G00yaa",
+    "ses_2ffba6a18ffePNYjnt51bXcX79",
+    "ses_2ff9ea738ffelc6Qh2RWlHJ1t6",
+    "ses_2ff82e8f2ffeIWaNGqkwvX3ZLh",
+    "ses_2ff5d406effe6pIZ2Byfs4JFU6",
+    "ses_2ff4fe690ffeYYL8V4Tw3nWS15",
+    "ses_2ff4fe4c7ffeOVoWnCQDm64kHq",
+    "ses_2ff3ee77bffeyEXcKd1vGUVIhj",
+    "ses_2ff3ee740ffeyYZ5r0IP6BbrHf",
+    "ses_2ff3765ddffejPHVa41r5OBeRf",
+    "ses_2ff0231fbffeBwWzPTzAR7Ilrj",
+    "ses_2ff0231f1ffeCLihjc2aswGxvR",
+    "ses_2fef9b748ffe556k0qcXnyvb0m",
+    "ses_2fec747f9ffePUUp8GZOUI4lQ8",
+    "ses_2fec85717ffeCtN0WfmQ9b4l10",
+    "ses_2fec8571fffejrSr7St1154b9n",
+    "ses_2fea6676bffeVt6cMAfNwVXpPT",
+    "ses_2fea0f34dffegjnigw1CBezFJd"
   ],
-  "plan_name": "custom-model-settings",
-  "agent": "atlas",
-  "worktree_path": "F:\\aigc\\BigBanana-AI-Director-custom-model-settings-wt"
+  "plan_name": "homepage-left-nav-layout",
+  "agent": "atlas"
 }

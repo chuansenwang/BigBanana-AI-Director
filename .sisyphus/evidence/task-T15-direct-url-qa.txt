@@ -1,0 +1,15 @@
+T15 Direct URL QA
+
+- URL used: https://www.w3schools.com/html/mov_bbb.mp4
+- Ingest status: ready
+- Analysis run completed and produced 3 shots
+- Edited breakdown text persisted before draft creation
+- Saved template path exercised
+- Draft creation navigated to a new episode URL
+- Derived episode state verified in IndexedDB:
+  - title: mov_bbb.mp4 - 派生草稿
+  - stage: script
+  - shotCount: 3
+  - rawScriptLength: 56
+- Negative-path validation also verified via service-level QA:
+  - watch/share URL rejected
