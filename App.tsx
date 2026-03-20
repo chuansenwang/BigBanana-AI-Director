@@ -247,7 +247,7 @@ function EpisodeWorkspace() {
       case 'prompts':
         return <StagePrompts project={currentEpisode} updateProject={handleUpdateProject} />;
       case 'analysis':
-        return <StageAnalysis project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} />;
+        return <StageAnalysis project={currentEpisode} updateProject={handleUpdateProject} onGeneratingChange={setIsGenerating} onShowModelConfig={() => setShowModelConfig(true)} />;
       default:
         return <div className="text-[var(--text-primary)]">未知阶段</div>;
     }

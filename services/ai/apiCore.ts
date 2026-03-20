@@ -60,6 +60,13 @@ export class ApiKeyError extends Error {
   }
 }
 
+export interface ApiKeyResolutionContext {
+  providerId?: string;
+  providerName?: string;
+  modelId?: string;
+  modelName?: string;
+}
+
 /** Runtime fallback API key (backward compatibility). */
 let runtimeApiKey: string = process.env.API_KEY || '';
 
@@ -139,6 +146,21 @@ export const checkApiKey = (type: 'chat' | 'image' | 'video' | 'audio' = 'chat',
   }
 
   return runtimeApiKey;
+};
+
+export const getApiKeyResolutionContext = (
+  type: 'chat' | 'image' | 'video' | 'audio' = 'chat',
+  modelId?: string,
+): ApiKeyResolutionContext => {
+  const resolvedModel = resolveModel(type, modelId);
+  const provider = resolvedModel ? getProviderById(resolvedModel.providerId) : undefined;
+
+  return {
+    providerId: provider?.id,
+    providerName: provider?.name,
+    modelId: resolvedModel?.id,
+    modelName: resolvedModel?.name,
+  };
 };
 
 /** Get API base URL for model/type */
@@ -488,15 +510,16 @@ export const parseHttpError = async (response: Response): Promise<Error> => {
 /** Non-stream chat completion */
 export const chatCompletion = async (
   prompt: string,
-  model: string = 'gpt-5.2',
+  model: string | undefined = undefined,
   temperature: number = 0.7,
   maxTokens?: number,
   responseFormat?: 'json_object',
   timeout: number = 600000,
   abortSignal?: AbortSignal
 ): Promise<string> => {
-  const apiKey = checkApiKey('chat', model);
-  const requestModel = resolveRequestModel('chat', model);
+  const resolvedModelId = model || getActiveChatModel()?.id || 'gpt-5.2';
+  const apiKey = checkApiKey('chat', resolvedModelId);
+  const requestModel = resolveRequestModel('chat', resolvedModelId);
   const wantsJson = responseFormat === 'json_object';
   const canUseNativeJsonObject = wantsJson && supportsNativeJsonObjectResponseFormat(requestModel);
   const effectivePrompt = wantsJson && !canUseNativeJsonObject
@@ -531,8 +554,7 @@ export const chatCompletion = async (
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const apiBase = getApiBase('chat', model);
-    const resolved = resolveModel('chat', model);
+    const resolved = resolveModel('chat', resolvedModelId);
     const provider = getProviderById(resolved?.providerId || '');
     const endpoint = resolved?.endpoint || '/v1/chat/completions';
     const configuredMaxTokens = resolved?.type === 'chat' ? resolved.params?.maxTokens : undefined;
@@ -548,7 +570,7 @@ export const chatCompletion = async (
         delete requestBodyWithTokens.max_tokens;
       }
       const authHeaders = buildAuthHeaders(provider, apiKey);
-      const response = await requestModelEndpoint('chat', resolved?.id || model, endpoint, {
+      const response = await requestModelEndpoint('chat', resolved?.id || resolvedModelId, endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -603,15 +625,16 @@ export const chatCompletion = async (
 /** Streaming chat completion (SSE) */
 export const chatCompletionStream = async (
   prompt: string,
-  model: string = 'gpt-5.2',
+  model: string | undefined = undefined,
   temperature: number = 0.7,
   responseFormat: 'json_object' | undefined,
   timeout: number = 600000,
   onDelta?: (delta: string) => void,
   abortSignal?: AbortSignal
 ): Promise<string> => {
-  const apiKey = checkApiKey('chat', model);
-  const requestModel = resolveRequestModel('chat', model);
+  const resolvedModelId = model || getActiveChatModel()?.id || 'gpt-5.2';
+  const apiKey = checkApiKey('chat', resolvedModelId);
+  const requestModel = resolveRequestModel('chat', resolvedModelId);
   const wantsJson = responseFormat === 'json_object';
   const canUseNativeJsonObject = wantsJson && supportsNativeJsonObjectResponseFormat(requestModel);
   const effectivePrompt = wantsJson && !canUseNativeJsonObject
@@ -643,15 +666,14 @@ export const chatCompletionStream = async (
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const apiBase = getApiBase('chat', model);
-    const resolved = resolveModel('chat', model);
+    const resolved = resolveModel('chat', resolvedModelId);
     const provider = getProviderById(resolved?.providerId || '');
     const endpoint = resolved?.endpoint || '/v1/chat/completions';
 
     if (provider?.connectionMode === 'proxy') {
       const fallbackResult = await chatCompletion(
         prompt,
-        model,
+        resolvedModelId,
         temperature,
         undefined,
         responseFormat,
@@ -666,7 +688,7 @@ export const chatCompletionStream = async (
 
     const executeRequest = async (body: any): Promise<Response> => {
       const authHeaders = buildAuthHeaders(provider, apiKey);
-      const response = await requestModelEndpoint('chat', resolved?.id || model, endpoint, {
+    const response = await requestModelEndpoint('chat', resolved?.id || resolvedModelId, endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

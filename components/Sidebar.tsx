@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText, Users, Clapperboard, Film, ChevronLeft, ListTree, HelpCircle, Cpu, Sun, Moon, Loader2, FolderOpen, BookOpen, Globe, Palette, User, ScanSearch } from 'lucide-react';
+import { FileText, Users, Clapperboard, Film, ChevronLeft, ListTree, HelpCircle, Cpu, Sun, Moon, Loader2, FolderOpen, BookOpen, Globe, Palette, User } from 'lucide-react';
 import logoImg from '../logo.png';
 import { useTheme } from '../contexts/ThemeContext';
 import { USER_MANUAL_URL, OFFICIAL_WEBSITE_URL, CREATIVE_HOME_URL, COPYRIGHT_TEXT } from '../constants/links';
@@ -23,7 +23,6 @@ const Sidebar: React.FC<SidebarProps> = ({ currentStage, setStage, onExit, proje
     { id: 'assets', label: '角色与场景', icon: Users, sub: '阶段 02' },
     { id: 'director', label: '导演工作台', icon: Clapperboard, sub: '阶段 03' },
     { id: 'export', label: '成片与导出', icon: Film, sub: '阶段 04' },
-    { id: 'analysis', label: '视频分析', icon: ScanSearch, sub: '研究' },
     { id: 'prompts', label: '提示词管理', icon: ListTree, sub: '高级' },
   ];
 

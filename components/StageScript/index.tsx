@@ -5,6 +5,7 @@ import {
   parseScriptStructure,
   enrichScriptDataVisuals,
   generateShotList,
+  generateShotListForLongScript,
   continueScript,
   continueScriptStream,
   rewriteScript,
@@ -15,6 +16,7 @@ import {
   clearScriptLogCallback,
   logScriptProgress,
   inferVisualStyleFromImage,
+  LONG_SCRIPT_ANALYZE_THRESHOLD,
 } from '../../services/aiService';
 import { getFinalValue, validateConfig } from './utils';
 import { DEFAULTS, SCRIPT_SOFT_LIMIT, SCRIPT_HARD_LIMIT } from './constants';
@@ -47,6 +49,130 @@ interface Props {
 
 type TabMode = 'story' | 'script';
 type AnalyzeRunStep = ScriptGenerationStep | 'done';
+
+interface LongScriptAnalyzeProgress {
+  phaseLabel: string;
+  chunkSummary: string;
+}
+
+const parseLongScriptAnalyzeProgress = (
+  logs: string[],
+  processingMessage: string
+): LongScriptAnalyzeProgress | null => {
+  const relevantLogs = logs.filter((line) => /长剧本|分块/.test(line));
+  let totalChunks: number | null = null;
+
+  for (const line of relevantLogs) {
+    const planningMatch = line.match(/长剧本规划完成：共\s*(\d+)\s*个分块/);
+    if (planningMatch) {
+      totalChunks = Number(planningMatch[1]);
+      continue;
+    }
+
+    const chunkMatch = line.match(/(?:解析长剧本分块|生成长剧本分块分镜)\s*(\d+)\/(\d+)/);
+    if (chunkMatch) {
+      totalChunks = Number(chunkMatch[2]);
+    }
+  }
+
+  const latestRelevantLog = [...relevantLogs].reverse().find(Boolean) || '';
+  const previousActiveLog = [...relevantLogs].reverse().find((line) => line && !line.includes('取消')) || '';
+
+  const buildChunkSummary = (current: number | null, total: number | null, fallback: string) => {
+    if (typeof current === 'number' && typeof total === 'number') {
+      return `分块 ${current}/${total}`;
+    }
+    if (typeof total === 'number') {
+      return `共 ${total} 个分块`;
+    }
+    return fallback;
+  };
+
+  const buildPlanningSummary = (total: number) => `规划完成 / 共 ${total} 个分块`;
+
+  const resolveProgressState = (
+    relevantLog: string,
+    currentProcessingMessage: string
+  ): LongScriptAnalyzeProgress | null => {
+    const completedMatch = relevantLog.match(/长剧本分镜生成完成：\s*(\d+)\s*个分块/);
+    if (completedMatch) {
+      const chunkCount = Number(completedMatch[1]);
+      return {
+        phaseLabel: '合并分镜结果',
+        chunkSummary: buildChunkSummary(chunkCount, chunkCount, '已完成'),
+      };
+    }
+
+    const shotMatch = relevantLog.match(/生成长剧本分块分镜\s*(\d+)\/(\d+)/);
+    if (shotMatch) {
+      return {
+        phaseLabel: '生成分块分镜',
+        chunkSummary: buildChunkSummary(Number(shotMatch[1]), Number(shotMatch[2]), '正在生成分块分镜'),
+      };
+    }
+
+    if (relevantLog.includes('开始为长剧本全局资产生成视觉提示词')) {
+      return {
+        phaseLabel: '生成全局视觉提示词',
+        chunkSummary: buildChunkSummary(totalChunks, totalChunks, '分块解析完成'),
+      };
+    }
+
+    const parsingMatch = relevantLog.match(/解析长剧本分块\s*(\d+)\/(\d+)/);
+    if (parsingMatch) {
+      return {
+        phaseLabel: '解析分块内容',
+        chunkSummary: buildChunkSummary(Number(parsingMatch[1]), Number(parsingMatch[2]), '正在解析分块'),
+      };
+    }
+
+    const plannedMatch = relevantLog.match(/长剧本规划完成：共\s*(\d+)\s*个分块/);
+    if (plannedMatch) {
+      return {
+        phaseLabel: '规划分块流程',
+        chunkSummary: buildPlanningSummary(Number(plannedMatch[1])),
+      };
+    }
+
+    if (relevantLog.includes('开始规划分块') || relevantLog.includes('分块分析模式')) {
+      return {
+        phaseLabel: '规划分块流程',
+        chunkSummary: buildChunkSummary(null, totalChunks, '正在估算分块数'),
+      };
+    }
+
+    if (currentProcessingMessage.includes('规划长剧本')) {
+      return {
+        phaseLabel: '规划分块流程',
+        chunkSummary: buildChunkSummary(null, totalChunks, '正在估算分块数'),
+      };
+    }
+
+    if (currentProcessingMessage.includes('解析长剧本并生成全局资产')) {
+      return {
+        phaseLabel: '解析分块内容',
+        chunkSummary: buildChunkSummary(null, totalChunks, '正在初始化分块'),
+      };
+    }
+
+    return null;
+  };
+
+  const isCanceling = processingMessage.includes('正在取消生成');
+  const isCanceled = latestRelevantLog.includes('已取消');
+  if (isCanceling || isCanceled) {
+    const previousProgress = resolveProgressState(previousActiveLog, '');
+    const fallbackSummary = typeof totalChunks === 'number'
+      ? `已取消 / 共 ${totalChunks} 个分块`
+      : '已取消';
+    return {
+      phaseLabel: isCanceling ? '正在取消长剧本分析' : '已取消长剧本分析',
+      chunkSummary: previousProgress?.chunkSummary || fallbackSummary,
+    };
+  }
+
+  return resolveProgressState(latestRelevantLog, processingMessage);
+};
 
 const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfig, onGeneratingChange, modelConfigVersion = 0 }) => {
   const { showAlert } = useAlert();
@@ -359,6 +485,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
   const [error, setError] = useState<string | null>(null);
   const [processingMessage, setProcessingMessage] = useState('');
   const [processingLogs, setProcessingLogs] = useState<string[]>([]);
+  const [isLongScriptAnalyzeMode, setIsLongScriptAnalyzeMode] = useState(false);
+  const [longScriptAnalyzeProgress, setLongScriptAnalyzeProgress] = useState<LongScriptAnalyzeProgress | null>(null);
 
   // Asset match state
   const [pendingParseResult, setPendingParseResult] = useState<{
@@ -392,6 +520,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     setSelectionRange(null);
     setLastRewriteSnapshot(null);
     setIsInferringVisualStyle(false);
+    setIsLongScriptAnalyzeMode(false);
+    setLongScriptAnalyzeProgress(null);
   }, [project.id]);
 
   useEffect(() => {
@@ -427,6 +557,15 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
 
     return () => clearScriptLogCallback();
   }, []);
+
+  useEffect(() => {
+    if (!isLongScriptAnalyzeMode) {
+      setLongScriptAnalyzeProgress(null);
+      return;
+    }
+
+    setLongScriptAnalyzeProgress(parseLongScriptAnalyzeProgress(processingLogs, processingMessage));
+  }, [isLongScriptAnalyzeMode, processingLogs, processingMessage]);
 
   useEffect(() => {
     if (isProcessing || isContinuing || isRewriting) return;
@@ -537,12 +676,14 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     const finalDuration = getFinalValue(localDuration, customDurationInput);
     const finalModel = resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel);
     const finalVisualStyle = getFinalValue(localVisualStyle, customStyleInput);
+    const isLongScriptAnalyze = localScript.length > LONG_SCRIPT_ANALYZE_THRESHOLD;
 
     const validation = validateConfig({
       script: localScript,
       duration: finalDuration,
       model: finalModel,
-      visualStyle: finalVisualStyle
+      visualStyle: finalVisualStyle,
+      allowAnalyzeOverHardLimit: isLongScriptAnalyze,
     });
 
     if (!validation.valid) {
@@ -552,6 +693,121 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
       }
       return;
     }
+
+    if (isLongScriptAnalyze) {
+      analyzeAbortControllerRef.current?.abort();
+      const controller = new AbortController();
+      let keepLongScriptProgressVisible = false;
+      analyzeAbortControllerRef.current = controller;
+
+      setIsProcessing(true);
+      setIsLongScriptAnalyzeMode(true);
+      setProcessingMessage('正在规划长剧本分镜流程...');
+      setProcessingLogs([]);
+      setError(null);
+
+      try {
+        logScriptProgress(`检测到长剧本（${localScript.length} 字符），将启用分块分析模式`);
+        logScriptProgress(`最终使用模型：${finalModel}`);
+        logScriptProgress(`视觉风格：${finalVisualStyle}`);
+
+        updateProject({
+          title: localTitle,
+          rawScript: localScript,
+          targetDuration: finalDuration,
+          language: localLanguage,
+          visualStyle: finalVisualStyle,
+          shotGenerationModel: finalModel,
+          isParsingScript: true,
+          scriptGenerationCheckpoint: null,
+        });
+
+        setProcessingMessage('正在解析长剧本并生成全局资产...');
+        const longScriptResult = await generateShotListForLongScript(localScript, {
+          targetDuration: finalDuration,
+          language: localLanguage,
+          model: finalModel,
+          visualStyle: finalVisualStyle,
+          title: localTitle,
+          enableQualityCheck,
+          promptTemplates,
+          abortSignal: controller.signal,
+        });
+
+        const workingScriptData = hydrateScriptDataMeta(longScriptResult.scriptData, {
+          targetDuration: finalDuration,
+          language: localLanguage,
+          visualStyle: finalVisualStyle,
+          model: finalModel,
+          localTitle,
+        });
+
+        if (project.projectId) {
+          try {
+            const seriesProject = await loadSeriesProject(project.projectId);
+            if (seriesProject) {
+              const matches = findAssetMatches(workingScriptData, seriesProject);
+              if (matches.hasAnyMatch) {
+                setPendingParseResult({
+                  scriptData: workingScriptData,
+                  shots: longScriptResult.shots,
+                  matches,
+                  title: workingScriptData.title
+                });
+                updateProject({
+                  isParsingScript: false,
+                  scriptGenerationCheckpoint: null
+                });
+                setIsProcessing(false);
+                setProcessingMessage('');
+                return;
+              }
+            }
+          } catch (e) {
+            console.warn('Asset match check failed, proceeding without match:', e);
+          }
+        }
+
+        const rebuiltRefs = rebuildAssetRefsFromScriptData(workingScriptData);
+        updateProject({
+          scriptData: workingScriptData,
+          shots: longScriptResult.shots,
+          characterRefs: rebuiltRefs.characterRefs,
+          sceneRefs: rebuiltRefs.sceneRefs,
+          propRefs: rebuiltRefs.propRefs,
+          isParsingScript: false,
+          title: workingScriptData.title,
+          scriptGenerationCheckpoint: null
+        });
+
+        setActiveTab('script');
+      } catch (err: any) {
+        console.error(err);
+        if (isAbortError(err, controller.signal)) {
+          keepLongScriptProgressVisible = true;
+          setError('已取消长剧本生成。');
+          logScriptProgress('长剧本生成已取消。');
+        } else {
+          setError(`错误: ${err.message || 'AI 连接失败'}`);
+        }
+        updateProject({ isParsingScript: false, scriptGenerationCheckpoint: null });
+      } finally {
+        if (analyzeAbortControllerRef.current === controller) {
+          analyzeAbortControllerRef.current = null;
+        }
+        setIsProcessing(false);
+        setProcessingMessage('');
+        if (!keepLongScriptProgressVisible) {
+          setIsLongScriptAnalyzeMode(false);
+          setLongScriptAnalyzeProgress(null);
+        }
+      }
+
+      return;
+    }
+
+    setIsLongScriptAnalyzeMode(false);
+    setLongScriptAnalyzeProgress(null);
 
     const previousScriptData = project.scriptData || null;
     const previousShots = Array.isArray(project.shots) ? project.shots : [];
@@ -1171,6 +1427,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     hasResumeCheckpoint && analyzeCheckpoint?.step !== 'structure'
       ? '继续生成分镜脚本'
       : '生成分镜脚本';
+  const willAutoSegmentOnAnalyze = localScript.length > LONG_SCRIPT_ANALYZE_THRESHOLD;
 
   const showProcessingToast = isProcessing || isContinuing || isRewriting;
   const toastMessage = processingMessage || (isProcessing
@@ -1357,7 +1614,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
   const handleAddShot = (sceneId: string) => {
     if (!project.scriptData) return;
 
-    const sceneShots = filterBySceneIdCompat(project.shots, sceneId);
+    const sceneShots = filterBySceneIdCompat<Shot>(project.shots, sceneId);
     if (sceneShots.length > 0) {
       handleAddSubShot(sceneShots[sceneShots.length - 1].id);
       return;
@@ -1452,6 +1709,18 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-500 border-t-white" />
             <div className="text-sm text-white">{toastMessage}</div>
           </div>
+          {isLongScriptAnalyzeMode && longScriptAnalyzeProgress && (
+            <div className="mt-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+              <div className="flex items-center justify-between gap-3 text-[11px]">
+                <span className="text-white/60">当前阶段</span>
+                <span className="text-white">{longScriptAnalyzeProgress.phaseLabel}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-[11px]">
+                <span className="text-white/60">分块进度</span>
+                <span className="font-mono text-white">{longScriptAnalyzeProgress.chunkSummary}</span>
+              </div>
+            </div>
+          )}
           {processingLogs.length > 0 && (
             <div className="mt-2 max-h-40 space-y-1 overflow-auto text-xs text-zinc-300">
               {processingLogs.map((line, index) => (
@@ -1502,6 +1771,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
             onToggleQualityCheck={setEnableQualityCheck}
             onAnalyze={handleAnalyze}
             analyzeButtonLabel={analyzeButtonLabel}
+            willAutoSegmentOnAnalyze={willAutoSegmentOnAnalyze}
+            longScriptAnalyzeProgress={isLongScriptAnalyzeMode ? longScriptAnalyzeProgress : null}
             canCancelAnalyze={!!analyzeAbortControllerRef.current}
             onCancelAnalyze={handleCancelAnalyze}
           />
@@ -1521,6 +1792,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
             canUndoRewrite={!!lastRewriteSnapshot}
             isContinuing={isContinuing}
             isRewriting={isRewriting}
+            willAutoSegmentOnAnalyze={willAutoSegmentOnAnalyze}
             lastModified={project.lastModified}
           />
         </div>

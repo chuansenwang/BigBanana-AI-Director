@@ -147,7 +147,7 @@ Max Concurrent: 5 in Wave 1
 
 ## TODOs
 
-- [ ] 1. Homepage behavior inventory and preservation contract
+- [x] 1. Homepage behavior inventory and preservation contract
 
   **What to do**:
   - Enumerate every root-homepage action currently exposed by `Dashboard` and decide where it lives in the new two-column layout.
@@ -215,7 +215,7 @@ Max Concurrent: 5 in Wave 1
 
   **Commit**: NO
 
-- [ ] 2. Left navigation structure for homepage actions
+- [x] 2. Left navigation structure for homepage actions
 
   **What to do**:
   - Design and implement the homepage-specific left vertical navigation structure, likely as a dedicated homepage nav component or a narrowly scoped extraction from `Dashboard`.
@@ -285,7 +285,7 @@ Max Concurrent: 5 in Wave 1
   - Files: `components/Dashboard.tsx` and/or extracted homepage-nav component files
   - Pre-commit: visual smoke check at desktop width
 
-- [ ] 3. Two-column homepage shell and responsive frame
+- [x] 3. Two-column homepage shell and responsive frame
 
   **What to do**:
   - Build the new desktop-first shell for the root homepage with a fixed/anchored left rail and a right content pane.
@@ -355,7 +355,7 @@ Max Concurrent: 5 in Wave 1
 
 ---
 
-- [ ] 4. Project-library panel migration into right content area
+- [x] 4. Project-library panel migration into right content area
 
   **What to do**:
   - Move the current project grid/create-card experience into the new right content pane without changing underlying project actions.
@@ -425,7 +425,7 @@ Max Concurrent: 5 in Wave 1
   - Files: `components/Dashboard.tsx` and any extracted project-panel component files
   - Pre-commit: create/open/delete smoke check
 
-- [ ] 5. Utility action relocation for help/theme/settings/account/new-project
+- [x] 5. Utility action relocation for help/theme/settings/account/new-project
 
   **What to do**:
   - Relocate the homepage utility actions from the current header cluster into their final sidebar and/or content-pane utility positions.
@@ -492,7 +492,7 @@ Max Concurrent: 5 in Wave 1
 
 ---
 
-- [ ] 6. DirectorHub banner and retained homepage secondary sections
+- [x] 6. DirectorHub banner and retained homepage secondary sections
 
   **What to do**:
   - Reposition the current DirectorHub section and any retained non-project-library homepage content into the new right content composition.
@@ -555,7 +555,7 @@ Max Concurrent: 5 in Wave 1
 
   **Commit**: NO
 
-- [ ] 7. Modal and overlay continuity for existing Dashboard flows
+- [x] 7. Modal and overlay continuity for existing Dashboard flows
 
   **What to do**:
   - Ensure all Dashboard-owned overlays still open above the new homepage layout correctly: group QR, settings modal, asset library modal, and asset-to-project picker.
@@ -625,7 +625,7 @@ Max Concurrent: 5 in Wave 1
   - Files: `components/Dashboard.tsx` and any extracted modal-host/layout files
   - Pre-commit: settings + asset-library modal smoke test
 
-- [ ] 8. Root-route regression pass and responsive polish
+- [x] 8. Root-route regression pass and responsive polish
 
   **What to do**:
   - Finalize root homepage integration and remove residual stacked-header artifacts.

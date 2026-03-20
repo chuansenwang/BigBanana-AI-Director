@@ -47,13 +47,14 @@ export const validateConfig = (config: {
   duration: string;
   model: string;
   visualStyle: string;
+  allowAnalyzeOverHardLimit?: boolean;
 }): { valid: boolean; error: string | null } => {
   const scriptText = config.script || '';
 
   if (!scriptText.trim()) {
     return { valid: false, error: '请输入剧本内容。' };
   }
-  if (scriptText.length > SCRIPT_HARD_LIMIT) {
+  if (scriptText.length > SCRIPT_HARD_LIMIT && !config.allowAnalyzeOverHardLimit) {
     return {
       valid: false,
       error: `当前剧本长度 ${scriptText.length} 字符，已超过上限 ${SCRIPT_HARD_LIMIT}。请拆分为多集后再生成分镜。`

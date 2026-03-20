@@ -31,6 +31,11 @@ interface Props {
   onToggleQualityCheck: (value: boolean) => void;
   onAnalyze: () => void;
   analyzeButtonLabel?: string;
+  willAutoSegmentOnAnalyze?: boolean;
+  longScriptAnalyzeProgress?: {
+    phaseLabel: string;
+    chunkSummary: string;
+  } | null;
   canCancelAnalyze?: boolean;
   onCancelAnalyze?: () => void;
 }
@@ -74,6 +79,8 @@ const ConfigPanel: React.FC<Props> = ({
   onToggleQualityCheck,
   onAnalyze,
   analyzeButtonLabel,
+  willAutoSegmentOnAnalyze = false,
+  longScriptAnalyzeProgress,
   canCancelAnalyze,
   onCancelAnalyze
 }) => {
@@ -241,6 +248,22 @@ const ConfigPanel: React.FC<Props> = ({
       </div>
 
       <div className="p-6 border-t border-[var(--border-primary)] bg-[var(--bg-primary)]">
+        {longScriptAnalyzeProgress ? (
+          <div className="mb-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)]/40 px-3 py-3">
+            <div className="flex items-center justify-between gap-3 text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+              <span>长剧本分析</span>
+              <span className="font-mono text-[var(--text-tertiary)] normal-case tracking-normal">{longScriptAnalyzeProgress.chunkSummary}</span>
+            </div>
+            <p className="mt-1 text-xs text-[var(--text-secondary)]">
+              当前阶段：{longScriptAnalyzeProgress.phaseLabel}
+            </p>
+          </div>
+        ) : willAutoSegmentOnAnalyze ? (
+          <div className="mb-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)]/40 px-3 py-3 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+            当前内容会在分析时自动按剧情分块拆解，逐块完成解析后再合并为同一份分镜结果，无需手动拆分为多集。
+          </div>
+        ) : null}
+
         <button
           onClick={onAnalyze}
           disabled={isProcessing}

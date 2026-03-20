@@ -1,12 +1,17 @@
 import {
   AnalysisShotSegment,
   AnalysisTranscriptArtifact,
+  LocalAnalysisRunData,
+  LocalShotVisionBatchResult,
   ProjectState,
   VideoAnalysisRecord,
   ViralScoreCard,
   ViralSignal,
   ViralTemplateRecord,
 } from '../types';
+import { runLocalAnalysis } from './localAnalysisService';
+import { loadLocalAnalysisUserConfig } from './localAnalysisConfigService';
+import { analyzeVideoShotsWithVision } from './localVideoVisionService';
 
 export class AnalysisPipelineError extends Error {
   partialRecord?: Partial<VideoAnalysisRecord>;
@@ -32,6 +37,206 @@ const buildSeedText = (project: ProjectState): string => {
   const source = project.analysisData?.source;
   const fallback = project.title || '视频分析样本';
   return source?.title || source?.fileName || source?.originalUrl || fallback;
+};
+
+type LocalTranscriptLine = LocalAnalysisRunData['transcript']['lines'][number];
+
+const clipText = (value: string, maxLength: number): string => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+};
+
+const joinTranscriptTexts = (texts: string[]): string => {
+  return texts.map(text => text.trim()).filter(Boolean).join('，');
+};
+
+const getLinesForRange = (
+  lines: LocalTranscriptLine[],
+  startMs: number,
+  endMs: number,
+): LocalTranscriptLine[] => {
+  const overlapping = lines.filter(line => line.endMs > startMs && line.startMs < endMs);
+  if (overlapping.length > 0) return overlapping;
+
+  const nearestLine = lines.find(line => line.startMs >= startMs) || lines.find(line => line.endMs <= endMs) || null;
+  return nearestLine ? [nearestLine] : [];
+};
+
+const buildLocalTranscriptSummary = (lines: LocalTranscriptLine[]): string => {
+  const mergedPreview = joinTranscriptTexts(lines.slice(0, 4).map(line => line.text));
+  if (!mergedPreview) {
+    return '本地分析已完成，但当前没有提取到可用的转录文本。';
+  }
+  return clipText(`本地分析已基于语音转录得到 ${lines.length} 条时间轴文本，可继续结合镜头切分结果做结构化复核。核心内容：${mergedPreview}`, 220);
+};
+
+const createShotTitle = (index: number, total: number): string => {
+  if (index === 0) return 'Opening / 开场';
+  if (index === total - 1) return 'Closing / 收束';
+  return `Scene ${index + 1} / 内容段落`;
+};
+
+const createShotVisualNotes = (index: number, total: number): string => {
+  if (index === 0) return '优先复核开场画面中的主体、字幕区与节奏建立方式。';
+  if (index === total - 1) return '优先复核结尾画面的结果呈现、CTA 与情绪收束。';
+  return '优先复核这一段的主体动作、镜头转换与信息密度变化。';
+};
+
+const buildShotFromLines = (
+  index: number,
+  total: number,
+  lines: LocalTranscriptLine[],
+  startMs: number,
+  endMs: number,
+): AnalysisShotSegment => {
+  const mergedText = joinTranscriptTexts(lines.map(line => line.text));
+  const summarySeed = clipText(mergedText || '当前段落缺少可用文本，建议回看原视频确认画面与节奏。', 140);
+
+  return {
+    id: `analysis_local_shot_${index + 1}`,
+    startMs,
+    endMs,
+    title: createShotTitle(index, total),
+    summary: index === 0
+      ? `开头围绕“${summarySeed}”快速建立内容切入点。`
+      : index === total - 1
+        ? `结尾围绕“${summarySeed}”完成结果收束或行动引导。`
+        : `这一段主要围绕“${summarySeed}”展开信息递进。`,
+    scriptSnippet: clipText(mergedText, 180) || undefined,
+    visualNotes: createShotVisualNotes(index, total),
+    viralElements: index === 0 ? ['hook', 'speed'] : index === total - 1 ? ['payoff', 'cta'] : ['explanation', 'rhythm'],
+    confidence: lines.length > 0 ? 0.88 : 0.62,
+  };
+};
+
+const chunkTranscriptLines = (lines: LocalTranscriptLine[]): LocalTranscriptLine[][] => {
+  if (lines.length <= 4) {
+    return lines.map(line => [line]);
+  }
+
+  const targetShotCount = Math.min(8, Math.max(3, Math.ceil(lines.length / 3)));
+  const linesPerShot = Math.max(1, Math.ceil(lines.length / targetShotCount));
+  const chunks: LocalTranscriptLine[][] = [];
+
+  for (let index = 0; index < lines.length; index += linesPerShot) {
+    chunks.push(lines.slice(index, index + linesPerShot));
+  }
+
+  return chunks;
+};
+
+const buildShotsFromLocalAnalysis = (result: LocalAnalysisRunData): AnalysisShotSegment[] => {
+  if (result.sceneSegments.length > 0) {
+    return result.sceneSegments.map((segment, index, allSegments) => {
+      const lines = getLinesForRange(result.transcript.lines, segment.startMs, segment.endMs);
+      return buildShotFromLines(index, allSegments.length, lines, segment.startMs, segment.endMs);
+    });
+  }
+
+  const chunks = chunkTranscriptLines(result.transcript.lines);
+  return chunks.map((chunk, index, allChunks) => {
+    const startMs = chunk[0]?.startMs ?? index * 3000;
+    const endMs = chunk[chunk.length - 1]?.endMs ?? startMs + 3000;
+    return buildShotFromLines(index, allChunks.length, chunk, startMs, endMs);
+  });
+};
+
+const buildTranscriptFromLocalAnalysis = (result: LocalAnalysisRunData): AnalysisTranscriptArtifact => {
+  return {
+    language: result.transcript.language || '未知',
+    mergedScript: result.transcript.mergedText,
+    summary: buildLocalTranscriptSummary(result.transcript.lines),
+    lines: result.transcript.lines,
+  };
+};
+
+interface LocalAnalysisAttemptResult {
+  data: LocalAnalysisRunData | null;
+  error: string | null;
+}
+
+interface VisionEnhancementAttemptResult {
+  data: LocalShotVisionBatchResult | null;
+  error: string | null;
+}
+
+export interface AnalysisRunOverrides {
+  enableSceneDetection?: boolean;
+}
+
+const tryRunLocalAnalysis = async (
+  project: ProjectState,
+  overrides: AnalysisRunOverrides,
+): Promise<LocalAnalysisAttemptResult> => {
+  const source = project.analysisData?.source;
+  if (!source || source.status !== 'ready') {
+    return { data: null, error: '分析源未就绪，未执行本地分析。' };
+  }
+
+  const userConfig = loadLocalAnalysisUserConfig();
+  const enableSceneDetection = overrides.enableSceneDetection !== false;
+
+  try {
+    const data = await runLocalAnalysis(source, {
+      enableSceneDetection,
+      language: 'auto',
+    }, userConfig);
+    return { data, error: null };
+  } catch (error) {
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : '本地分析执行失败，已回退到内置分析。',
+    };
+  }
+};
+
+const mergeVisionAnalysesIntoShots = (
+  shots: AnalysisShotSegment[],
+  visionResult: LocalShotVisionBatchResult | null,
+): AnalysisShotSegment[] => {
+  if (!visionResult || visionResult.analyses.length === 0) {
+    return shots;
+  }
+
+  const byShotId = new Map(visionResult.analyses.map((analysis) => [analysis.shotId, analysis]));
+
+  return shots.map((shot) => {
+    const vision = byShotId.get(shot.id);
+    if (!vision) return shot;
+
+    return {
+      ...shot,
+      title: vision.title || shot.title,
+      summary: vision.summary || shot.summary,
+      visualNotes: vision.visualNotes || shot.visualNotes,
+      viralElements: vision.viralElements.length > 0 ? vision.viralElements : shot.viralElements,
+      confidence: vision.confidence ?? shot.confidence,
+    };
+  });
+};
+
+const tryRunVisionEnhancement = async (
+  project: ProjectState,
+  shots: AnalysisShotSegment[],
+  transcript: AnalysisTranscriptArtifact,
+): Promise<VisionEnhancementAttemptResult> => {
+  const source = project.analysisData?.source;
+  if (!source || shots.length === 0) {
+    return { data: null, error: '缺少可用于视觉增强的镜头数据或视频源。' };
+  }
+
+  const userConfig = loadLocalAnalysisUserConfig();
+
+  try {
+    const data = await analyzeVideoShotsWithVision(source, shots, transcript, userConfig.visionModel || 'gpt-4o');
+    return { data, error: null };
+  } catch (error) {
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : '视觉增强执行失败，已保留基础分析结果。',
+    };
+  }
 };
 
 const buildShots = (seed: string): AnalysisShotSegment[] => {
@@ -232,12 +437,22 @@ export interface AnalysisOrchestrationResult {
   rawResponse: string;
 }
 
-export const runAnalysisOrchestration = async (project: ProjectState): Promise<AnalysisOrchestrationResult> => {
+export const runAnalysisOrchestration = async (
+  project: ProjectState,
+  overrides: AnalysisRunOverrides = {},
+): Promise<AnalysisOrchestrationResult> => {
   ensureValidSource(project);
   await new Promise(resolve => setTimeout(resolve, 900));
   const seed = buildSeedText(project);
-  const shots = buildShots(seed);
-  const transcript = buildTranscript(seed, shots);
+  const localAnalysisAttempt = await tryRunLocalAnalysis(project, overrides);
+  const localAnalysis = localAnalysisAttempt.data;
+  const baseShots = localAnalysis ? buildShotsFromLocalAnalysis(localAnalysis) : buildShots(seed);
+  const transcript = localAnalysis ? buildTranscriptFromLocalAnalysis(localAnalysis) : buildTranscript(seed, baseShots);
+  const visionEnhancementAttempt = localAnalysis
+    ? await tryRunVisionEnhancement(project, baseShots, transcript)
+    : { data: null, error: localAnalysisAttempt.error ? '本地分析未成功，已跳过视觉增强。' : null };
+  const visionEnhancement = visionEnhancementAttempt.data;
+  const shots = visionEnhancement ? mergeVisionAnalysesIntoShots(baseShots, visionEnhancement) : baseShots;
   const viralSignals = buildSignals(shots);
   const sourceTitle = project.analysisData?.source?.title || project.analysisData?.source?.originalUrl || '';
 
@@ -262,7 +477,19 @@ export const runAnalysisOrchestration = async (project: ProjectState): Promise<A
   const score = buildScore(viralSignals);
   const templateCandidates = buildTemplateCandidates(project, shots);
 
-  const rawResponse = JSON.stringify({ seed, shots, transcript, viralSignals, score, templateCandidates }, null, 2);
+  const rawResponse = JSON.stringify({
+    mode: localAnalysis ? (visionEnhancement ? 'local-analysis+vision' : 'local-analysis') : 'mock-fallback',
+    seed,
+    localAnalysis,
+    localAnalysisError: localAnalysisAttempt.error,
+    visionEnhancement,
+    visionEnhancementError: visionEnhancementAttempt.error,
+    shots,
+    transcript,
+    viralSignals,
+    score,
+    templateCandidates,
+  }, null, 2);
 
   const record: VideoAnalysisRecord = {
     source: project.analysisData?.source || null,
@@ -310,5 +537,6 @@ export const normalizeAnalysisRecord = (record: Partial<VideoAnalysisRecord>): V
     derivedDraft: record.derivedDraft ?? null,
     templateCandidates: record.templateCandidates ?? [],
     applyHistory: record.applyHistory ?? [],
+    benchmarkImport: record.benchmarkImport ?? null,
   };
 };

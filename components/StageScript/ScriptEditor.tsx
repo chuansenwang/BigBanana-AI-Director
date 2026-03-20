@@ -6,6 +6,7 @@ interface Props {
   script: string;
   scriptSoftLimit: number;
   scriptHardLimit: number;
+  willAutoSegmentOnAnalyze?: boolean;
   onChange: (value: string) => void;
   onContinue: () => void;
   onRewrite: () => void;
@@ -25,6 +26,7 @@ const ScriptEditor: React.FC<Props> = ({
   script,
   scriptSoftLimit,
   scriptHardLimit,
+  willAutoSegmentOnAnalyze = false,
   onChange,
   onContinue,
   onRewrite,
@@ -54,7 +56,9 @@ const ScriptEditor: React.FC<Props> = ({
         ? 'warning'
         : 'normal';
   const scriptLimitHint = scriptLengthStatus === 'error'
-    ? `超出上限 ${stats.characters}/${scriptHardLimit}，请拆分为多集`
+    ? willAutoSegmentOnAnalyze
+      ? `超出单集编辑上限 ${stats.characters}/${scriptHardLimit}，分析时会自动分块拆解并合并分镜结果`
+      : `超出上限 ${stats.characters}/${scriptHardLimit}，请拆分为多集`
     : scriptLengthStatus === 'warning'
       ? `接近上限 ${stats.characters}/${scriptHardLimit}（建议单集 ≤ ${scriptSoftLimit}）`
       : `建议单集长度 ≤ ${scriptSoftLimit} 字符`;

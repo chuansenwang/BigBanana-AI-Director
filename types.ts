@@ -358,6 +358,26 @@ export interface ScriptData {
   };
 }
 
+export interface LongScriptChunkPlan {
+  chunkId: string;
+  chunkIndex: number;
+  startChar: number;
+  endChar: number;
+  text: string;
+  estimatedDurationSeconds: number;
+  estimatedShotCount: number;
+  paragraphCount: number;
+}
+
+export interface LongScriptChunkResult {
+  plan: LongScriptChunkPlan;
+  scriptData: ScriptData;
+  shots: Shot[];
+  characterIdMap: Record<string, string>;
+  sceneIdMap: Record<string, string>;
+  propIdMap: Record<string, string>;
+}
+
 export interface RenderLog {
   id: string;
   timestamp: number; // Unix timestamp when API was called
@@ -422,7 +442,7 @@ export interface EpisodePropRef {
 
 export type ScriptGenerationStep = 'structure' | 'visuals' | 'shots';
 
-export type AnalysisInputKind = 'url' | 'upload';
+export type AnalysisInputKind = 'url' | 'upload' | 'benchmark';
 export type AnalysisLineSource = 'subtitle' | 'ocr' | 'stt' | 'merged';
 export type ViralSignalCategory = 'hook' | 'shot' | 'script' | 'rhythm' | 'emotion' | 'cta';
 
@@ -535,6 +555,121 @@ export interface VideoAnalysisRecord {
   derivedDraft: AnalysisDerivedDraftPayload | null;
   templateCandidates: ViralTemplateRecord[];
   applyHistory: AnalysisApplyHistoryEntry[];
+  benchmarkImport?: BenchmarkAnalysisImportMeta | null;
+}
+
+export interface BenchmarkAnalysisImportMeta {
+  benchmarkId: string;
+  importedAt: number;
+  analysisMode?: BenchmarkAnalysisMode;
+  transcriptStatus?: BenchmarkTranscriptStatus;
+  analysisBasis?: string;
+  warnings: string[];
+  sourceMeta?: BenchmarkSourceMeta;
+}
+
+export interface LocalAnalysisRunOptions {
+  enableSceneDetection?: boolean;
+  language?: string;
+  whisperModel?: string;
+  maxDurationMs?: number;
+}
+
+export interface LocalAnalysisUserConfig {
+  whisperBinaryPath: string;
+  whisperModelPath: string;
+  pythonBinaryPath: string;
+  visionModel: string;
+}
+
+export interface LocalAnalysisToolStatus {
+  available: boolean;
+  binaryPath?: string;
+  modelPath?: string;
+  command?: string;
+  version?: string;
+  warnings: string[];
+}
+
+export interface LocalAnalysisHealthData {
+  whisper: LocalAnalysisToolStatus;
+  sceneDetect: LocalAnalysisToolStatus;
+  tempDir: string;
+  platform: string;
+  warnings: string[];
+}
+
+export interface LocalAnalysisToolRunMeta {
+  used: boolean;
+  model?: string;
+  durationMs: number;
+  stderrSummary?: string;
+}
+
+export interface LocalAnalysisTranscriptLine {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  source: 'stt';
+}
+
+export interface LocalAnalysisTranscriptData {
+  language?: string;
+  lines: LocalAnalysisTranscriptLine[];
+  mergedText: string;
+}
+
+export interface LocalAnalysisSceneSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+}
+
+export interface LocalAnalysisRawResponse {
+  whisperStdout?: string;
+  whisperStderr?: string;
+  sceneDetectStdout?: string;
+  sceneDetectStderr?: string;
+}
+
+export interface LocalAnalysisRunData {
+  transcript: LocalAnalysisTranscriptData;
+  sceneSegments: LocalAnalysisSceneSegment[];
+  warnings: string[];
+  toolMeta: {
+    whisper: LocalAnalysisToolRunMeta;
+    sceneDetect?: LocalAnalysisToolRunMeta;
+  };
+  rawResponse: LocalAnalysisRawResponse;
+}
+
+export interface LocalAnalysisHealthResponse {
+  ok: boolean;
+  data?: LocalAnalysisHealthData;
+  error?: string;
+}
+
+export interface LocalAnalysisRunResponse {
+  ok: boolean;
+  data?: LocalAnalysisRunData;
+  error?: string;
+}
+
+export interface LocalShotVisionAnalysis {
+  shotId: string;
+  title?: string;
+  summary: string;
+  visualNotes: string;
+  viralElements: string[];
+  confidence?: number;
+  rawResponse?: string;
+}
+
+export interface LocalShotVisionBatchResult {
+  analyses: LocalShotVisionAnalysis[];
+  warnings: string[];
+  model: string;
 }
 
 export type ViralTemplateType = 'video' | 'hook' | 'shot' | 'script' | 'rhythm' | 'emotion';
@@ -732,6 +867,22 @@ export interface BenchmarkMetrics {
   t3_customMetrics: string;
 }
 
+export type BenchmarkTranscriptStatus = 'available' | 'unavailable' | 'error';
+export type BenchmarkAnalysisMode = 'full' | 'metadata';
+export type BenchmarkFallbackReason = 'missing_api_key' | 'no_transcript' | 'ai_failed';
+
+export interface BenchmarkSourceMeta {
+  videoId: string;
+  canonicalUrl: string;
+  channelTitle?: string;
+  channelId?: string;
+  thumbnailUrl?: string;
+  durationSeconds?: number;
+  viewCount?: number;
+  likeCount?: number;
+  transcriptLanguage?: string;
+}
+
 export interface BenchmarkVideo {
   id: string;
   url: string;
@@ -741,4 +892,11 @@ export interface BenchmarkVideo {
   status: 'draft' | 'analyzing' | 'completed' | 'failed';
   deconstructResult: BenchmarkShotResult[] | null;
   metrics?: BenchmarkMetrics;
+  sourceMeta?: BenchmarkSourceMeta;
+  transcriptStatus?: BenchmarkTranscriptStatus;
+  analysisMode?: BenchmarkAnalysisMode;
+  fallbackReason?: BenchmarkFallbackReason;
+  analysisBasis?: string;
+  warnings?: string[];
+  errorMessage?: string;
 }

@@ -19,6 +19,7 @@ interface StageAnalysisProps {
   project: ProjectState;
   updateProject: (updates: Partial<ProjectState> | ((prev: ProjectState) => ProjectState)) => void;
   onGeneratingChange?: (isGenerating: boolean) => void;
+  onShowModelConfig?: () => void;
 }
 
 type AnalysisSubView = 'benchmark' | 'overview';
@@ -43,7 +44,7 @@ const SUB_VIEWS: Array<{
   },
 ];
 
-const StageAnalysis: React.FC<StageAnalysisProps> = ({ project, updateProject, onGeneratingChange }) => {
+const StageAnalysis: React.FC<StageAnalysisProps> = ({ project, updateProject, onGeneratingChange, onShowModelConfig }) => {
   const [activeSubView, setActiveSubView] = useState<AnalysisSubView>('benchmark');
 
   useEffect(() => {
@@ -115,7 +116,12 @@ const StageAnalysis: React.FC<StageAnalysisProps> = ({ project, updateProject, o
               ]} />
             </div>
 
-            <BreakdownPanel project={project} updateProject={updateProject} onGeneratingChange={onGeneratingChange} />
+            <BreakdownPanel
+              project={project}
+              updateProject={updateProject}
+              onGeneratingChange={onGeneratingChange}
+              onOpenLocalAnalysisSettings={onShowModelConfig}
+            />
             <TemplatePanel project={project} />
             <ApplyPanel project={project} updateProject={updateProject} />
           </>

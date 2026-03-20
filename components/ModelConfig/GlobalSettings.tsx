@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X } from 'lucide-react';
+import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X, Cpu } from 'lucide-react';
 import { ModelProvider, ProviderAuthHeaderType, ProviderAuthMode, ProviderConnectionMode, ProviderProtocol } from '../../types/model';
 import { getGlobalApiKey, setGlobalApiKey, getProviders, addProvider, updateProvider } from '../../services/modelRegistry';
 import { verifyApiKey } from '../../services/modelService';
@@ -13,6 +13,9 @@ import { CUSTOM_PROVIDER_PROTOCOLS } from '../../services/modelProtocolService';
 import { validateProviderDraft } from '../../services/modelValidationService';
 import { useAlert } from '../GlobalAlert';
 import { testProviderConnection } from '../../services/providerConnectionTestService';
+import { LocalAnalysisHealthData, LocalAnalysisUserConfig } from '../../types';
+import { loadLocalAnalysisUserConfig, saveLocalAnalysisUserConfig } from '../../services/localAnalysisConfigService';
+import { fetchLocalAnalysisHealth } from '../../services/localAnalysisService';
 
 interface GlobalSettingsProps {
   onRefresh: () => void;
@@ -31,16 +34,54 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
   const [isTestingProvider, setIsTestingProvider] = useState(false);
   const [providerTestMessage, setProviderTestMessage] = useState('');
   const [providerTestStatus, setProviderTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [localAnalysisConfig, setLocalAnalysisConfig] = useState<LocalAnalysisUserConfig>(() => loadLocalAnalysisUserConfig());
+  const [localAnalysisMessage, setLocalAnalysisMessage] = useState('');
+  const [localAnalysisHealth, setLocalAnalysisHealth] = useState<LocalAnalysisHealthData | null>(null);
+  const [localAnalysisHealthError, setLocalAnalysisHealthError] = useState('');
+  const [isCheckingLocalAnalysisHealth, setIsCheckingLocalAnalysisHealth] = useState(false);
 
   useEffect(() => {
     const currentKey = getGlobalApiKey() || '';
     setApiKey(currentKey);
     setProviders(getProviders());
+    setLocalAnalysisConfig(loadLocalAnalysisUserConfig());
     if (currentKey) {
       setVerifyStatus('success');
       setVerifyMessage('API Key 已配置');
     }
   }, []);
+
+  const updateLocalAnalysisField = (field: keyof LocalAnalysisUserConfig, value: string) => {
+    setLocalAnalysisConfig((prev) => ({ ...prev, [field]: value }));
+    setLocalAnalysisMessage('');
+    setLocalAnalysisHealth(null);
+    setLocalAnalysisHealthError('');
+  };
+
+  const handleSaveLocalAnalysisConfig = () => {
+    const saved = saveLocalAnalysisUserConfig(localAnalysisConfig);
+    setLocalAnalysisConfig(saved);
+    setLocalAnalysisMessage('本地分析配置已保存。之后所有分析工作台都会复用这组路径和视觉模型。');
+    onRefresh();
+  };
+
+  const handleCheckLocalAnalysisHealth = async () => {
+    setLocalAnalysisHealthError('');
+    setLocalAnalysisMessage('');
+    setIsCheckingLocalAnalysisHealth(true);
+    try {
+      const saved = saveLocalAnalysisUserConfig(localAnalysisConfig);
+      setLocalAnalysisConfig(saved);
+      const health = await fetchLocalAnalysisHealth(saved);
+      setLocalAnalysisHealth(health);
+      setLocalAnalysisMessage('本地环境检查完成。若 whisper.cpp 已就绪，就可以回到分析页直接运行。');
+    } catch (error) {
+      setLocalAnalysisHealth(null);
+      setLocalAnalysisHealthError(error instanceof Error ? error.message : '本地环境检查失败，请稍后重试。');
+    } finally {
+      setIsCheckingLocalAnalysisHealth(false);
+    }
+  };
 
   const handleVerifyAndSave = async () => {
     if (!apiKey.trim()) {
@@ -316,6 +357,108 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
           <li>支持添加自定义模型，使用其他 API 服务</li>
           <li>所有配置仅保存在本地浏览器，不会上传到服务器</li>
         </ul>
+      </div>
+
+      <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)]/40 p-5">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--accent-bg)] border border-[var(--accent-border)]">
+            <Cpu className="w-5 h-5 text-[var(--accent-text)]" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-bold text-[var(--text-primary)]">本地分析</h3>
+            <p className="mt-2 text-xs leading-6 text-[var(--text-tertiary)]">
+              这里配置的是这台电脑如何运行 whisper.cpp、PySceneDetect 和视觉增强默认模型。它们会在所有分析工作台里复用，不属于某个单独项目。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">whisper.cpp 可执行文件</span>
+            <input
+              type="text"
+              value={localAnalysisConfig.whisperBinaryPath}
+              onChange={(e) => updateLocalAnalysisField('whisperBinaryPath', e.target.value)}
+              placeholder="例如 F:\\AI\\whisper\\whisper-cli.exe"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">whisper 模型文件</span>
+            <input
+              type="text"
+              value={localAnalysisConfig.whisperModelPath}
+              onChange={(e) => updateLocalAnalysisField('whisperModelPath', e.target.value)}
+              placeholder="例如 F:\\AI\\models\\ggml-base.bin"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">Python 路径</span>
+            <input
+              type="text"
+              value={localAnalysisConfig.pythonBinaryPath}
+              onChange={(e) => updateLocalAnalysisField('pythonBinaryPath', e.target.value)}
+              placeholder="例如 python 或 C:\\Python312\\python.exe"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">视觉解析模型</span>
+            <input
+              type="text"
+              value={localAnalysisConfig.visionModel}
+              onChange={(e) => updateLocalAnalysisField('visionModel', e.target.value)}
+              placeholder="例如 gpt-4o"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+        </div>
+
+        <p className="mt-4 text-[10px] leading-6 text-[var(--text-muted)]">
+          自动场景检测开关属于单次分析行为，保留在 Analysis 页里；这里仅保存这台机器的默认工具路径和视觉模型。
+        </p>
+
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={handleSaveLocalAnalysisConfig}
+            className="flex-1 py-3 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] text-xs font-bold uppercase tracking-wider transition-colors rounded-lg border border-[var(--border-primary)]"
+          >
+            保存本地分析配置
+          </button>
+          <button
+            onClick={handleCheckLocalAnalysisHealth}
+            disabled={isCheckingLocalAnalysisHealth}
+            className="flex-1 py-3 bg-[var(--accent)] text-[var(--text-primary)] font-bold text-xs uppercase tracking-wider rounded-lg hover:bg-[var(--accent-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isCheckingLocalAnalysisHealth ? <><Loader2 className="w-3 h-3 animate-spin" />检查中...</> : '检查本地环境'}
+          </button>
+        </div>
+
+        {localAnalysisMessage && <div className="mt-3 text-[10px] text-[var(--success-text)]">{localAnalysisMessage}</div>}
+        {localAnalysisHealthError && <div className="mt-3 text-[10px] text-[var(--error-text)] whitespace-pre-wrap">{localAnalysisHealthError}</div>}
+
+        {localAnalysisHealth && (
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-4 text-[10px] leading-6 text-[var(--text-tertiary)]">
+              <div className="font-bold text-[var(--text-primary)]">whisper.cpp</div>
+              <div className="mt-2">状态：{localAnalysisHealth.whisper.available ? '已就绪' : '未就绪'}</div>
+              <div>路径：{localAnalysisHealth.whisper.binaryPath || '未填写'}</div>
+              <div>模型：{localAnalysisHealth.whisper.modelPath || '未填写'}</div>
+              {!!localAnalysisHealth.whisper.warnings[0] && <div className="mt-2 text-[var(--warning)]">{localAnalysisHealth.whisper.warnings[0]}</div>}
+            </div>
+            <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-4 text-[10px] leading-6 text-[var(--text-tertiary)]">
+              <div className="font-bold text-[var(--text-primary)]">PySceneDetect</div>
+              <div className="mt-2">状态：{localAnalysisHealth.sceneDetect.available ? '已就绪' : '未就绪'}</div>
+              <div>命令：{localAnalysisHealth.sceneDetect.command || '未填写'}</div>
+              <div>平台：{localAnalysisHealth.platform}</div>
+              {!!localAnalysisHealth.sceneDetect.warnings[0] && <div className="mt-2 text-[var(--warning)]">{localAnalysisHealth.sceneDetect.warnings[0]}</div>}
+            </div>
+          </div>
+        )}
       </div>
 
       <div>

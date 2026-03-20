@@ -128,7 +128,7 @@ const SceneBreakdown: React.FC<Props> = ({
         <div className="flex-1 overflow-y-auto bg-[var(--bg-base)] p-0">
           <div className="max-w-5xl mx-auto pb-20">
             {project.scriptData?.scenes.map((scene, index) => {
-              const sceneShots = filterBySceneIdCompat(project.shots, scene.id);
+                const sceneShots = filterBySceneIdCompat<Shot>(project.shots, scene.id);
 
               return (
                 <div key={scene.id} className="border-b border-[var(--border-primary)]">

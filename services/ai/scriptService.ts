@@ -13,6 +13,8 @@ import {
   QualityCheck,
   ShotQualityAssessment,
   PromptTemplateConfig,
+  LongScriptChunkPlan,
+  LongScriptChunkResult,
 } from "../../types";
 import { addRenderLogWithTokens } from '../renderLogService';
 import { parseDurationToSeconds } from '../durationParser';
@@ -236,6 +238,11 @@ const VISUAL_PROMPT_TASK_STAGGER_MS = 150;
 const SHOT_SCENE_CONCURRENCY = 2;
 const SHOT_SCENE_BATCH_GAP_MS = 450;
 const SHOT_SCENE_TASK_STAGGER_MS = 200;
+
+export const LONG_SCRIPT_ANALYZE_THRESHOLD = 20000;
+const LONG_SCRIPT_CHUNK_TARGET_CHARS = 9000;
+const LONG_SCRIPT_CHUNK_MAX_CHARS = 11000;
+const LONG_SCRIPT_CHUNK_MIN_CHARS = 3500;
 
 export interface VisualStyleInferenceResult {
   stylePrompt: string;
@@ -879,6 +886,403 @@ export const parseScriptToData = async (
     });
     throw error;
   }
+};
+
+const cloneScriptDataValue = <T,>(value: T): T => {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+};
+
+const buildDurationString = (seconds: number): string => {
+  return `${Math.max(1, Math.round(seconds))}s`;
+};
+
+const normalizeCoverageText = (value: string): string => {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
+const splitOversizedChunkText = (text: string): string[] => {
+  const normalized = String(text || '').trim();
+  if (!normalized) return [];
+  if (normalized.length <= LONG_SCRIPT_CHUNK_MAX_CHARS) return [normalized];
+
+  const sentenceParts = normalized
+    .split(/(?<=[。！？!?；;])\s+|\n+/g)
+    .map(part => part.trim())
+    .filter(Boolean);
+  const units = sentenceParts.length > 0 ? sentenceParts : [normalized];
+  const result: string[] = [];
+  let current = '';
+
+  for (const unit of units) {
+    if (!current) {
+      if (unit.length > LONG_SCRIPT_CHUNK_MAX_CHARS) {
+        for (let start = 0; start < unit.length; start += LONG_SCRIPT_CHUNK_TARGET_CHARS) {
+          result.push(unit.slice(start, start + LONG_SCRIPT_CHUNK_TARGET_CHARS).trim());
+        }
+        continue;
+      }
+      current = unit;
+      continue;
+    }
+
+    const candidate = `${current}\n${unit}`;
+    if (
+      candidate.length > LONG_SCRIPT_CHUNK_MAX_CHARS &&
+      current.length >= LONG_SCRIPT_CHUNK_MIN_CHARS
+    ) {
+      result.push(current);
+      current = unit;
+      continue;
+    }
+
+    current = candidate;
+  }
+
+  if (current) {
+    result.push(current);
+  }
+
+  return result.filter(Boolean);
+};
+
+const buildLongScriptChunkPlans = (
+  rawText: string,
+  targetSeconds: number,
+  shotDurationSeconds: number
+): LongScriptChunkPlan[] => {
+  const normalizedRaw = normalizeCoverageText(rawText);
+  const paragraphs = normalizedRaw
+    .split(/\n{2,}/g)
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  const blocks = (paragraphs.length > 0 ? paragraphs : [normalizedRaw])
+    .flatMap(splitOversizedChunkText)
+    .filter(Boolean);
+
+  const chunkTexts: string[] = [];
+  let current = '';
+
+  for (const block of blocks) {
+    if (!current) {
+      current = block;
+      continue;
+    }
+
+    const candidate = `${current}\n\n${block}`;
+    const shouldSplit = (
+      candidate.length > LONG_SCRIPT_CHUNK_TARGET_CHARS && current.length >= LONG_SCRIPT_CHUNK_MIN_CHARS
+    ) || current.length >= LONG_SCRIPT_CHUNK_MAX_CHARS;
+
+    if (shouldSplit) {
+      chunkTexts.push(current);
+      current = block;
+      continue;
+    }
+
+    current = candidate;
+  }
+
+  if (current) {
+    chunkTexts.push(current);
+  }
+
+  const normalizedChunkTexts = chunkTexts
+    .map(chunk => normalizeCoverageText(chunk))
+    .filter(Boolean);
+
+  if (normalizedChunkTexts.length === 0) {
+    throw new Error('长剧本分块失败：未生成可用分块。');
+  }
+
+  const totalShotCount = Math.max(
+    normalizedChunkTexts.length,
+    Math.round(Math.max(1, targetSeconds) / Math.max(1, shotDurationSeconds))
+  );
+  const weights = normalizedChunkTexts.map(text => Math.max(1, text.length));
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+
+  const durationAllocations = weights.map(weight => Math.max(1, Math.floor((weight / totalWeight) * targetSeconds)));
+  const targetDurationTotal = Math.max(normalizedChunkTexts.length, Math.round(targetSeconds));
+  let remainingDuration = targetDurationTotal - durationAllocations.reduce((sum, value) => sum + value, 0);
+  let durationIndex = 0;
+  while (remainingDuration > 0) {
+    durationAllocations[durationIndex % durationAllocations.length] += 1;
+    remainingDuration -= 1;
+    durationIndex += 1;
+  }
+  while (remainingDuration < 0) {
+    const indexToReduce = durationIndex % durationAllocations.length;
+    if (durationAllocations[indexToReduce] > 1) {
+      durationAllocations[indexToReduce] -= 1;
+      remainingDuration += 1;
+    }
+    durationIndex += 1;
+  }
+
+  const shotAllocations = durationAllocations.map(seconds => Math.max(1, Math.round(seconds / Math.max(1, shotDurationSeconds))));
+  let remainingShots = totalShotCount - shotAllocations.reduce((sum, value) => sum + value, 0);
+  let shotIndex = 0;
+  while (remainingShots > 0) {
+    shotAllocations[shotIndex % shotAllocations.length] += 1;
+    remainingShots -= 1;
+    shotIndex += 1;
+  }
+  while (remainingShots < 0) {
+    const indexToReduce = shotIndex % shotAllocations.length;
+    if (shotAllocations[indexToReduce] > 1) {
+      shotAllocations[indexToReduce] -= 1;
+      remainingShots += 1;
+    }
+    shotIndex += 1;
+  }
+
+  let searchCursor = 0;
+  return normalizedChunkTexts.map((text, index) => {
+    const startChar = normalizedRaw.indexOf(text, searchCursor);
+    const safeStartChar = startChar >= 0 ? startChar : searchCursor;
+    const endChar = safeStartChar + text.length;
+    searchCursor = endChar;
+
+    return {
+      chunkId: `chunk-${index + 1}`,
+      chunkIndex: index,
+      startChar: safeStartChar,
+      endChar,
+      text,
+      estimatedDurationSeconds: durationAllocations[index],
+      estimatedShotCount: shotAllocations[index],
+      paragraphCount: text.split(/\n{2,}/g).map(part => part.trim()).filter(Boolean).length,
+    };
+  });
+};
+
+const validateLongScriptChunkPlanCoverage = (
+  rawText: string,
+  plans: LongScriptChunkPlan[]
+): void => {
+  const original = normalizeCoverageText(rawText);
+  const reconstructed = normalizeCoverageText(plans.map(plan => plan.text).join('\n\n'));
+  if (!original || !reconstructed || original !== reconstructed) {
+    throw new Error('长剧本分块覆盖校验失败：分块后的文本无法完整重建原始剧本。');
+  }
+};
+
+const buildSceneMergeKey = (scene: Scene): string => {
+  const location = normalizeMatchText(scene.location || '');
+  const time = normalizeMatchText(scene.time || '');
+  const atmosphere = normalizeMatchText(scene.atmosphere || '');
+  if (!location && !time && !atmosphere) return '';
+  return [location, time, atmosphere].join('|');
+};
+
+const mergeChunkCharactersIntoGlobal = (
+  globalCharacters: Character[],
+  chunkCharacters: Character[]
+): Record<string, string> => {
+  const idMap: Record<string, string> = {};
+  const byName = new Map<string, Character>();
+  for (const item of globalCharacters) {
+    const key = normalizeMatchText(item.name);
+    if (key && !byName.has(key)) {
+      byName.set(key, item);
+    }
+  }
+
+  for (const item of chunkCharacters) {
+    const key = normalizeMatchText(item.name);
+    const existing = key ? byName.get(key) : undefined;
+    if (existing) {
+      idMap[String(item.id)] = String(existing.id);
+      continue;
+    }
+
+    const nextId = `char-${globalCharacters.length + 1}`;
+    const nextItem: Character = {
+      ...cloneScriptDataValue(item),
+      id: nextId,
+      variations: Array.isArray(item.variations) ? item.variations : [],
+    };
+    globalCharacters.push(nextItem);
+    if (key) {
+      byName.set(key, nextItem);
+    }
+    idMap[String(item.id)] = nextId;
+  }
+
+  return idMap;
+};
+
+const mergeChunkPropsIntoGlobal = (
+  globalProps: Prop[],
+  chunkProps: Prop[]
+): Record<string, string> => {
+  const idMap: Record<string, string> = {};
+  const byName = new Map<string, Prop>();
+  for (const item of globalProps) {
+    const key = normalizeMatchText(item.name);
+    if (key && !byName.has(key)) {
+      byName.set(key, item);
+    }
+  }
+
+  for (const item of chunkProps) {
+    const key = normalizeMatchText(item.name);
+    const existing = key ? byName.get(key) : undefined;
+    if (existing) {
+      idMap[String(item.id)] = String(existing.id);
+      continue;
+    }
+
+    const nextId = `prop-${globalProps.length + 1}`;
+    const nextItem: Prop = {
+      ...cloneScriptDataValue(item),
+      id: nextId,
+    };
+    globalProps.push(nextItem);
+    if (key) {
+      byName.set(key, nextItem);
+    }
+    idMap[String(item.id)] = nextId;
+  }
+
+  return idMap;
+};
+
+const mergeChunkScenesIntoGlobal = (
+  globalScenes: Scene[],
+  chunkScenes: Scene[]
+): Record<string, string> => {
+  const idMap: Record<string, string> = {};
+  const byKey = new Map<string, Scene>();
+  for (const item of globalScenes) {
+    const key = buildSceneMergeKey(item);
+    if (key && !byKey.has(key)) {
+      byKey.set(key, item);
+    }
+  }
+
+  for (const item of chunkScenes) {
+    const key = buildSceneMergeKey(item);
+    const existing = key ? byKey.get(key) : undefined;
+    if (existing) {
+      idMap[String(item.id)] = String(existing.id);
+      continue;
+    }
+
+    const nextId = `scene-${globalScenes.length + 1}`;
+    const nextItem: Scene = {
+      ...cloneScriptDataValue(item),
+      id: nextId,
+    };
+    globalScenes.push(nextItem);
+    if (key) {
+      byKey.set(key, nextItem);
+    }
+    idMap[String(item.id)] = nextId;
+  }
+
+  return idMap;
+};
+
+const composeChunkScriptData = (input: {
+  globalScriptData: ScriptData;
+  parsedChunk: ScriptData;
+  plan: LongScriptChunkPlan;
+  characterIdMap: Record<string, string>;
+  sceneIdMap: Record<string, string>;
+  propIdMap: Record<string, string>;
+}): ScriptData => {
+  const { globalScriptData, parsedChunk, plan, characterIdMap, sceneIdMap, propIdMap } = input;
+
+  const globalCharactersById = new Map((globalScriptData.characters || []).map(item => [String(item.id), item]));
+  const globalScenesById = new Map((globalScriptData.scenes || []).map(item => [String(item.id), item]));
+  const globalPropsById = new Map((globalScriptData.props || []).map(item => [String(item.id), item]));
+
+  const localCharacters = (parsedChunk.characters || [])
+    .map(item => globalCharactersById.get(characterIdMap[String(item.id)]))
+    .filter((item): item is Character => !!item)
+    .map(item => cloneScriptDataValue(item));
+
+  const localScenes = (parsedChunk.scenes || [])
+    .map(item => globalScenesById.get(sceneIdMap[String(item.id)]))
+    .filter((item): item is Scene => !!item)
+    .map(item => cloneScriptDataValue(item));
+
+  const localProps = (parsedChunk.props || [])
+    .map(item => globalPropsById.get(propIdMap[String(item.id)]))
+    .filter((item): item is Prop => !!item)
+    .map(item => cloneScriptDataValue(item));
+
+  const validSceneIds = new Set(localScenes.map(item => String(item.id)));
+  const fallbackSceneId = localScenes[0]?.id || globalScriptData.scenes[0]?.id || 'scene-1';
+  const storyParagraphs = (parsedChunk.storyParagraphs || []).map((paragraph, index) => {
+    const remappedSceneId = sceneIdMap[String(paragraph.sceneRefId)] || String(paragraph.sceneRefId || '');
+    return {
+      id: index + 1,
+      text: String(paragraph.text || '').trim(),
+      sceneRefId: validSceneIds.has(remappedSceneId) ? remappedSceneId : fallbackSceneId,
+    };
+  }).filter(paragraph => paragraph.text.length > 0);
+
+  return {
+    ...cloneScriptDataValue(globalScriptData),
+    targetDuration: buildDurationString(plan.estimatedDurationSeconds),
+    characters: localCharacters,
+    scenes: localScenes,
+    props: localProps,
+    storyParagraphs,
+  };
+};
+
+const validateLongScriptChunkResults = (
+  rawText: string,
+  plans: LongScriptChunkPlan[],
+  results: LongScriptChunkResult[]
+): void => {
+  validateLongScriptChunkPlanCoverage(rawText, plans);
+  if (results.length !== plans.length) {
+    throw new Error(`长剧本分块结果数量不匹配：期望 ${plans.length}，实际 ${results.length}`);
+  }
+
+  for (const result of results) {
+    const hasCoverage = (result.scriptData.storyParagraphs || []).length > 0 || (result.scriptData.scenes || []).length > 0;
+    if (!hasCoverage) {
+      throw new Error(`长剧本分块解析失败：${result.plan.chunkId} 未提取到任何场景或段落。`);
+    }
+  }
+};
+
+const reindexMergedLongScriptShots = (shots: Shot[]): Shot[] => {
+  return shots.map((shot, index) => {
+    const nextShotId = `shot-${index + 1}`;
+    const keyframes = (shot.keyframes || []).map((keyframe) => ({
+      ...keyframe,
+      id: `kf-${index + 1}-${keyframe.type}`,
+    }));
+    const startKeyframe = keyframes.find(item => item.type === 'start');
+    const endKeyframe = keyframes.find(item => item.type === 'end');
+
+    return {
+      ...shot,
+      id: nextShotId,
+      keyframes,
+      interval: shot.interval
+        ? {
+            ...shot.interval,
+            id: `interval-${index + 1}`,
+            startKeyframeId: startKeyframe?.id || `kf-${index + 1}-start`,
+            endKeyframeId: endKeyframe?.id || `kf-${index + 1}-end`,
+          }
+        : undefined,
+    };
+  });
 };
 
 // ============================================
@@ -1942,6 +2346,170 @@ export const generateShotList = async (
   }
   logScriptProgress(`分镜生成完成，总耗时 ${Math.round((Date.now() - overallStartTime) / 1000)}s`);
   return qualityCheckedShots;
+};
+
+export const generateShotListForLongScript = async (
+  rawText: string,
+  input: {
+    targetDuration: string;
+    language?: string;
+    model?: string;
+    visualStyle?: string;
+    title?: string;
+    enableQualityCheck?: boolean;
+    promptTemplates?: PromptTemplateConfig;
+    abortSignal?: AbortSignal;
+  }
+): Promise<{ scriptData: ScriptData; shots: Shot[]; chunkResults: LongScriptChunkResult[] }> => {
+  const {
+    targetDuration,
+    language = '中文',
+    model = 'gpt-5.2',
+    visualStyle = '3d-animation',
+    title,
+    enableQualityCheck = true,
+    promptTemplates,
+    abortSignal,
+  } = input;
+
+  const ensureNotAborted = () => {
+    if (abortSignal?.aborted) {
+      throw new Error('请求已取消');
+    }
+  };
+
+  const targetSeconds = parseDurationToSeconds(targetDuration) || 60;
+  const activeVideoModel = getActiveVideoModel();
+  const shotDurationSeconds = Math.max(1, Number(activeVideoModel?.params?.defaultDuration) || 8);
+
+  logScriptProgress('长剧本模式已启用：开始规划分块...');
+  const plans = buildLongScriptChunkPlans(rawText, targetSeconds, shotDurationSeconds);
+  validateLongScriptChunkPlanCoverage(rawText, plans);
+  logScriptProgress(`长剧本规划完成：共 ${plans.length} 个分块，目标时长 ${targetSeconds}s`);
+
+  const parsedChunks: Array<{
+    plan: LongScriptChunkPlan;
+    scriptData: ScriptData;
+    characterIdMap: Record<string, string>;
+    sceneIdMap: Record<string, string>;
+    propIdMap: Record<string, string>;
+  }> = [];
+
+  const mergedScriptData: ScriptData = {
+    title: title?.trim() || '未命名剧本',
+    genre: '通用',
+    logline: '',
+    targetDuration,
+    language,
+    visualStyle,
+    shotGenerationModel: model,
+    planningShotDuration: shotDurationSeconds,
+    characters: [],
+    scenes: [],
+    props: [],
+    storyParagraphs: [],
+  };
+
+  for (const plan of plans) {
+    ensureNotAborted();
+    logScriptProgress(`解析长剧本分块 ${plan.chunkIndex + 1}/${plans.length}（约 ${plan.estimatedDurationSeconds}s）...`);
+    const parsed = await parseScriptStructure(plan.text, language, model, abortSignal);
+
+    if (!mergedScriptData.logline && parsed.logline) {
+      mergedScriptData.logline = parsed.logline;
+    }
+    if ((!title || !title.trim()) && mergedScriptData.title === '未命名剧本' && parsed.title) {
+      mergedScriptData.title = parsed.title;
+    }
+    if (mergedScriptData.genre === '通用' && parsed.genre) {
+      mergedScriptData.genre = parsed.genre;
+    }
+
+    const characterIdMap = mergeChunkCharactersIntoGlobal(mergedScriptData.characters, parsed.characters || []);
+    const sceneIdMap = mergeChunkScenesIntoGlobal(mergedScriptData.scenes, parsed.scenes || []);
+    const propIdMap = mergeChunkPropsIntoGlobal(mergedScriptData.props, parsed.props || []);
+
+    const validMergedSceneIds = new Set(mergedScriptData.scenes.map(scene => String(scene.id)));
+    const fallbackSceneId = mergedScriptData.scenes[0]?.id || 'scene-1';
+    const nextParagraphs = (parsed.storyParagraphs || []).map((paragraph, index) => {
+      const remappedSceneId = sceneIdMap[String(paragraph.sceneRefId)] || String(paragraph.sceneRefId || '');
+      return {
+        id: mergedScriptData.storyParagraphs.length + index + 1,
+        text: String(paragraph.text || '').trim(),
+        sceneRefId: validMergedSceneIds.has(remappedSceneId) ? remappedSceneId : fallbackSceneId,
+      };
+    }).filter(paragraph => paragraph.text.length > 0);
+
+    mergedScriptData.storyParagraphs.push(...nextParagraphs);
+    parsedChunks.push({ plan, scriptData: parsed, characterIdMap, sceneIdMap, propIdMap });
+  }
+
+  if (mergedScriptData.storyParagraphs.length === 0) {
+    throw new Error('长剧本解析失败：所有分块均未提取到有效剧情段落。');
+  }
+
+  logScriptProgress(
+    `全局资产合并完成：角色 ${mergedScriptData.characters.length}，场景 ${mergedScriptData.scenes.length}，道具 ${mergedScriptData.props.length}`
+  );
+
+  ensureNotAborted();
+  logScriptProgress('开始为长剧本全局资产生成视觉提示词...');
+  const enrichedGlobalScriptData = await enrichScriptDataVisuals(
+    mergedScriptData,
+    model,
+    visualStyle,
+    language,
+    { abortSignal }
+  );
+  enrichedGlobalScriptData.targetDuration = targetDuration;
+  enrichedGlobalScriptData.shotGenerationModel = model;
+  enrichedGlobalScriptData.planningShotDuration = shotDurationSeconds;
+
+  const chunkResults: LongScriptChunkResult[] = [];
+  for (const parsedChunk of parsedChunks) {
+    ensureNotAborted();
+    const localChunkScriptData = composeChunkScriptData({
+      globalScriptData: enrichedGlobalScriptData,
+      parsedChunk: parsedChunk.scriptData,
+      plan: parsedChunk.plan,
+      characterIdMap: parsedChunk.characterIdMap,
+      sceneIdMap: parsedChunk.sceneIdMap,
+      propIdMap: parsedChunk.propIdMap,
+    });
+    localChunkScriptData.shotGenerationModel = model;
+    localChunkScriptData.visualStyle = visualStyle;
+    localChunkScriptData.language = language;
+    localChunkScriptData.planningShotDuration = shotDurationSeconds;
+
+    logScriptProgress(
+      `生成长剧本分块分镜 ${parsedChunk.plan.chunkIndex + 1}/${plans.length}（目标 ${parsedChunk.plan.estimatedShotCount} 镜）...`
+    );
+    const shots = await generateShotList(localChunkScriptData, model, {
+      abortSignal,
+      enableQualityCheck,
+      promptTemplates,
+    });
+
+    chunkResults.push({
+      plan: parsedChunk.plan,
+      scriptData: localChunkScriptData,
+      shots,
+      characterIdMap: parsedChunk.characterIdMap,
+      sceneIdMap: parsedChunk.sceneIdMap,
+      propIdMap: parsedChunk.propIdMap,
+    });
+  }
+
+  validateLongScriptChunkResults(rawText, plans, chunkResults);
+
+  const mergedShots = reindexMergedLongScriptShots(chunkResults.flatMap(result => result.shots));
+  logScriptProgress(`长剧本分镜生成完成：${plans.length} 个分块，共 ${mergedShots.length} 条分镜`);
+
+  return {
+    scriptData: enrichedGlobalScriptData,
+    shots: mergedShots,
+    chunkResults,
+  };
 };
 
 // ============================================

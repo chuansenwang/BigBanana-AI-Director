@@ -1,8 +1,10 @@
 import path from 'path';
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { createLocalAnalysisProxyHandler } from './server/localAnalysisProxyCore.mjs';
 import { createNewApiProxyHandler } from './server/newApiProxyCore.mjs';
 import { createModelProxyHandler } from './server/modelProxyCore.mjs';
+import { createYouTubeBenchmarkHandler } from './server/youtubeBenchmarkProxyCore.mjs';
 
 const createDevMediaProxyPlugin = (): Plugin => ({
   name: 'dev-media-proxy',
@@ -98,6 +100,28 @@ const createDevModelProxyPlugin = (): Plugin => ({
   },
 });
 
+const createDevYouTubeBenchmarkProxyPlugin = (): Plugin => ({
+  name: 'dev-youtube-benchmark-proxy',
+  configureServer(server) {
+    const handler = createYouTubeBenchmarkHandler();
+    server.middlewares.use(async (req, res, next) => {
+      const handled = await handler(req, res);
+      if (!handled) next();
+    });
+  },
+});
+
+const createDevLocalAnalysisProxyPlugin = (): Plugin => ({
+  name: 'dev-local-analysis-proxy',
+  configureServer(server) {
+    const handler = createLocalAnalysisProxyHandler();
+    server.middlewares.use(async (req, res, next) => {
+      const handled = await handler(req, res);
+      if (!handled) next();
+    });
+  },
+});
+
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
@@ -105,7 +129,7 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
       },
-      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin(), createDevModelProxyPlugin()],
+      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin(), createDevModelProxyPlugin(), createDevYouTubeBenchmarkProxyPlugin(), createDevLocalAnalysisProxyPlugin()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.ANTSK_API_KEY),
         'process.env.ANTSK_API_KEY': JSON.stringify(env.ANTSK_API_KEY)

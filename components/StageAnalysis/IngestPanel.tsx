@@ -33,6 +33,7 @@ const IngestPanel: React.FC<IngestPanelProps> = ({ project, updateProject, onGen
         derivedDraft: prev.analysisData?.derivedDraft || null,
         templateCandidates: prev.analysisData?.templateCandidates || [],
         applyHistory: prev.analysisData?.applyHistory || [],
+        benchmarkImport: nextSource?.source?.kind === 'benchmark' ? prev.analysisData?.benchmarkImport || null : null,
       },
     }));
   };
@@ -76,6 +77,7 @@ const IngestPanel: React.FC<IngestPanelProps> = ({ project, updateProject, onGen
   };
 
   const source = project.analysisData?.source;
+  const benchmarkImport = project.analysisData?.benchmarkImport;
   const sourceStatus = source?.status || 'idle';
   const isReady = sourceStatus === 'ready';
   const statusIcon = isReady ? <CheckCircle2 className="h-4 w-4 text-[var(--success)]" /> : <AlertTriangle className="h-4 w-4 text-[var(--warning)]" />;
@@ -126,10 +128,17 @@ const IngestPanel: React.FC<IngestPanelProps> = ({ project, updateProject, onGen
             </div>
             {source && (
               <div className="mt-3 grid gap-2 text-sm text-[var(--text-tertiary)] md:grid-cols-2">
-                <div>类型：{source.kind === 'url' ? '直链' : '上传文件'}</div>
+                <div>类型：{source.kind === 'url' ? '直链' : source.kind === 'upload' ? '上传文件' : '对标导入'}</div>
                 <div>标题：{source.title || source.fileName || '未命名视频'}</div>
-                <div className="truncate">媒体引用：{source.persistedVideoRef || '未持久化'}</div>
+                <div className="truncate">媒体引用：{source.persistedVideoRef || (source.kind === 'benchmark' ? '对标导入，无本地视频文件' : '未持久化')}</div>
                 <div>MIME：{source.mimeType || '未知'}</div>
+              </div>
+            )}
+            {benchmarkImport && (
+              <div className="mt-3 rounded-2xl border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-sm leading-6 text-[var(--warning)]">
+                <div>当前内容来自首页 YouTube 对标导入。</div>
+                {benchmarkImport.analysisBasis ? <div className="mt-1">分析依据：{benchmarkImport.analysisBasis}</div> : null}
+                {benchmarkImport.warnings.length > 0 ? <div className="mt-1">提示：{benchmarkImport.warnings[0]}</div> : <div className="mt-1">如需重新运行本地视频分析，请补充可直接访问的视频文件直链或本地上传。</div>}
               </div>
             )}
             {isSubmitting && (
