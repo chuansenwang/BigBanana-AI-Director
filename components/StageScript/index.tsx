@@ -17,6 +17,8 @@ import {
   logScriptProgress,
   inferVisualStyleFromImage,
   LONG_SCRIPT_ANALYZE_THRESHOLD,
+  preparseScriptInput,
+  SCRIPT_PREPARSE_VERSION,
 } from '../../services/aiService';
 import { getFinalValue, validateConfig } from './utils';
 import { DEFAULTS, SCRIPT_SOFT_LIMIT, SCRIPT_HARD_LIMIT } from './constants';
@@ -54,6 +56,24 @@ interface LongScriptAnalyzeProgress {
   phaseLabel: string;
   chunkSummary: string;
 }
+
+interface ScriptPreparseSummary {
+  applied: boolean;
+  appliedLabel: string;
+  modeLabel: string;
+  counts: Array<{
+    label: string;
+    value: number;
+  }>;
+  warnings: string[];
+}
+
+const PREPARSE_MODE_LABELS: Record<string, string> = {
+  plain: '原文直送',
+  'cn-structured': '中文结构',
+  'shot-table': '分镜表',
+  mixed: '混合结构',
+};
 
 const parseLongScriptAnalyzeProgress = (
   logs: string[],
@@ -235,6 +255,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     model: string;
     visualStyle: string;
     enableQualityCheck: boolean;
+    preparseVersion: string;
   }): string => {
     const raw = JSON.stringify(input);
     return `v1-${hashRaw(raw)}`;
@@ -814,7 +835,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
 
     const structureKey = buildStepKey('structure', {
       script: localScript,
-      language: localLanguage
+      language: localLanguage,
+      preparseVersion: SCRIPT_PREPARSE_VERSION,
     });
     const visualsKey = buildStepKey('visuals', {
       structureKey,
@@ -835,7 +857,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
       targetDuration: finalDuration,
       model: finalModel,
       visualStyle: finalVisualStyle,
-      enableQualityCheck
+      enableQualityCheck,
+      preparseVersion: SCRIPT_PREPARSE_VERSION,
     });
     const savedCheckpoint = project.scriptGenerationCheckpoint;
     const resumeCheckpoint =
@@ -1416,7 +1439,8 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
     targetDuration: getDraftValue(localDuration, customDurationInput, project.targetDuration || DEFAULTS.duration),
       model: resolveStageChatModel(localModel, customModelInput, project.shotGenerationModel),
     visualStyle: getDraftValue(localVisualStyle, customStyleInput, project.visualStyle || DEFAULTS.visualStyle),
-    enableQualityCheck
+    enableQualityCheck,
+    preparseVersion: SCRIPT_PREPARSE_VERSION,
   });
   const analyzeCheckpoint = project.scriptGenerationCheckpoint;
   const hasResumeCheckpoint =
@@ -1428,6 +1452,37 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
       ? '继续生成分镜脚本'
       : '生成分镜脚本';
   const willAutoSegmentOnAnalyze = localScript.length > LONG_SCRIPT_ANALYZE_THRESHOLD;
+  const preparseSummary = useMemo<ScriptPreparseSummary | null>(() => {
+    if (!localScript.trim()) {
+      return null;
+    }
+
+    const result = preparseScriptInput(localScript);
+    const warningMessages = Array.from(
+      new Set(
+        result.warnings
+          .map((warning) => String(warning.message || '').trim())
+          .filter(Boolean)
+      )
+    );
+    const compactWarnings = warningMessages.slice(0, 2);
+
+    if (warningMessages.length > 2) {
+      compactWarnings.push(`另有 ${warningMessages.length - 2} 条提示`);
+    }
+
+    return {
+      applied: result.applied,
+      appliedLabel: result.applied ? '已应用' : '未触发',
+      modeLabel: PREPARSE_MODE_LABELS[result.mode] || result.mode,
+      counts: [
+        { label: '结构段', value: result.detectedStructure.sectionCount },
+        { label: '分镜表', value: result.detectedStructure.shotTableCount },
+        { label: '镜头条目', value: result.detectedStructure.shotCount },
+      ],
+      warnings: compactWarnings,
+    };
+  }, [localScript]);
 
   const showProcessingToast = isProcessing || isContinuing || isRewriting;
   const toastMessage = processingMessage || (isProcessing
@@ -1771,6 +1826,7 @@ const StageScript: React.FC<Props> = ({ project, updateProject, onShowModelConfi
             onToggleQualityCheck={setEnableQualityCheck}
             onAnalyze={handleAnalyze}
             analyzeButtonLabel={analyzeButtonLabel}
+            preparseSummary={preparseSummary}
             willAutoSegmentOnAnalyze={willAutoSegmentOnAnalyze}
             longScriptAnalyzeProgress={isLongScriptAnalyzeMode ? longScriptAnalyzeProgress : null}
             canCancelAnalyze={!!analyzeAbortControllerRef.current}

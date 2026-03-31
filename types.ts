@@ -582,6 +582,14 @@ export interface LocalAnalysisUserConfig {
   visionModel: string;
 }
 
+export interface ArtifactStorageUserConfig {
+  rootFolder: string;
+  downloadsFolder: string;
+  slicesFolder: string;
+  groupByProject: boolean;
+  groupByEpisode: boolean;
+}
+
 export interface LocalAnalysisToolStatus {
   available: boolean;
   binaryPath?: string;
@@ -883,6 +891,22 @@ export interface BenchmarkSourceMeta {
   transcriptLanguage?: string;
 }
 
+export type BenchmarkDownloadStatus = 'pending' | 'downloading' | 'ready' | 'failed';
+
+export interface BenchmarkDownloadArtifact {
+  status: BenchmarkDownloadStatus;
+  localPath?: string;
+  fileName?: string;
+  outputDirectory?: string;
+  progressPercent?: number;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  speedBytesPerSecond?: number;
+  etaSeconds?: number;
+  errorMessage?: string;
+  warnings?: string[];
+}
+
 export interface BenchmarkVideo {
   id: string;
   url: string;
@@ -891,6 +915,7 @@ export interface BenchmarkVideo {
   lastModified: number;
   status: 'draft' | 'analyzing' | 'completed' | 'failed';
   deconstructResult: BenchmarkShotResult[] | null;
+  breakdownReport?: string;
   metrics?: BenchmarkMetrics;
   sourceMeta?: BenchmarkSourceMeta;
   transcriptStatus?: BenchmarkTranscriptStatus;
@@ -899,4 +924,5 @@ export interface BenchmarkVideo {
   analysisBasis?: string;
   warnings?: string[];
   errorMessage?: string;
+  downloadArtifact?: BenchmarkDownloadArtifact;
 }

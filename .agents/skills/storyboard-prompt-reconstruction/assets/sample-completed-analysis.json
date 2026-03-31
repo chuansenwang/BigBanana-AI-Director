@@ -1,0 +1,180 @@
+{
+  "schema_version": "1.0.0",
+  "status": "partial",
+  "warnings": [
+    "sample file for format illustration only"
+  ],
+  "inputs": {
+    "manifest_path": "F:/aigc/BigBanana-AI-Director/.agents/skills/storyboard-prompt-reconstruction/assets/sample-manifest.json",
+    "source_output_dir": "C:/example/storyboard-output",
+    "prompt_language": "en",
+    "include_turning_points": true
+  },
+  "summary": {
+    "total_rows": 3,
+    "analyzable_rows": 2,
+    "pending_rows": 0,
+    "ok_rows": 1,
+    "partial_rows": 1,
+    "skipped_rows": 1,
+    "failed_rows": 0
+  },
+  "shots": [
+    {
+      "row_index": 1,
+      "shot_number": "001",
+      "base_name": "S001_00-00-03-500_00-00-08-920",
+      "start_time": "00:00:03.500",
+      "end_time": "00:00:08.920",
+      "source_status": "ok",
+      "source_warnings": [],
+      "source_error_code": null,
+      "source_error_message": null,
+      "source_title": "opening-shot",
+      "source_notes": "slow push in",
+      "source_scene": "street",
+      "source_speaker": "hero",
+      "source_row": {
+        "shot_number": "001",
+        "start_time": "00:00:03.500",
+        "end_time": "00:00:08.920",
+        "title": "opening-shot",
+        "notes": "slow push in",
+        "scene": "street",
+        "speaker": "hero"
+      },
+      "frame_evidence": {
+        "first_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_first.png",
+        "middle_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_middle.png",
+        "middle_frame_paths": [
+          "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_middle.png"
+        ],
+        "last_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_last.png",
+        "turning_points": [
+          {
+            "index": 1,
+            "timestamp_seconds": 2.1,
+            "frame_path": "C:/example/storyboard-output/keyframes/S001_00-00-03-500_00-00-08-920_turning01_t2-100.png"
+          }
+        ]
+      },
+      "reconstruction": {
+        "status": "ok",
+        "confidence": "medium",
+        "prompt_language": "en",
+        "combined_prompt": "cinematic urban street shot of a lone hero, medium framing, subtle forward push-in, grounded live-action look, soft natural daylight, clear subject separation, restrained background clutter",
+        "first_frame_prompt": "hero standing on a city street, medium shot, calm pose, soft daylight, clean urban background",
+        "middle_frame_prompt": "same hero and street setting, camera slightly closer, stronger subject emphasis, continuous daylight mood",
+        "last_frame_prompt": "hero remains in the same street environment, closer framing with sustained focus and stable lighting",
+        "transition_summary": "The shot holds the same subject and street environment while gradually pushing in and increasing subject emphasis.",
+        "negative_prompt": "extra characters, crowded street clutter, costume drift, distorted face, inconsistent lighting",
+        "continuity_notes": [
+          "Keep the same hero identity and wardrobe across the shot.",
+          "Preserve the street environment and daylight mood."
+        ],
+        "missing_details": [],
+        "warnings": []
+      }
+    },
+    {
+      "row_index": 2,
+      "shot_number": "002",
+      "base_name": "S002_00-00-15-000_00-00-21-240",
+      "start_time": "00:00:15.000",
+      "end_time": "00:00:21.240",
+      "source_status": "partial",
+      "source_warnings": [
+        "middle frame extraction failed; required outputs preserved when possible"
+      ],
+      "source_error_code": "ffmpeg_frame_failed",
+      "source_error_message": "middle frame extraction failed",
+      "source_title": "hero-closeup",
+      "source_notes": "hold expression",
+      "source_scene": null,
+      "source_speaker": "hero",
+      "source_row": {
+        "shot_number": "002",
+        "start_time": "00:00:15.000",
+        "end_time": "00:00:21.240",
+        "title": "hero-closeup",
+        "notes": "hold expression",
+        "speaker": "hero"
+      },
+      "frame_evidence": {
+        "first_frame_path": "C:/example/storyboard-output/frames/S002_00-00-15-000_00-00-21-240_first.png",
+        "middle_frame_path": null,
+        "middle_frame_paths": [],
+        "last_frame_path": "C:/example/storyboard-output/frames/S002_00-00-15-000_00-00-21-240_last.png",
+        "turning_points": []
+      },
+      "reconstruction": {
+        "status": "partial",
+        "confidence": "low",
+        "prompt_language": "en",
+        "combined_prompt": "cinematic close-up of the hero, stable expression-focused framing, minimal background detail, soft naturalistic light, consistent face and wardrobe",
+        "first_frame_prompt": "hero close-up, expression held, soft naturalistic light, minimal background",
+        "middle_frame_prompt": "",
+        "last_frame_prompt": "hero close-up remains steady with consistent expression emphasis and lighting",
+        "transition_summary": "The shot appears to hold a close-up expression beat, but midpoint evidence is missing.",
+        "negative_prompt": "extra faces, facial distortion, costume drift, noisy background",
+        "continuity_notes": [
+          "Keep the same face, hair, and wardrobe details."
+        ],
+        "missing_details": [
+          "No middle-frame evidence was available for the midpoint state."
+        ],
+        "warnings": [
+          "Midpoint prompt is inferred from start/end evidence only."
+        ]
+      }
+    },
+    {
+      "row_index": 3,
+      "shot_number": "003",
+      "base_name": "S003_00-01-02-125_00-01-05-900",
+      "start_time": "00:01:02.125",
+      "end_time": "00:01:05.900",
+      "source_status": "failed",
+      "source_warnings": [],
+      "source_error_code": "ffmpeg_clip_failed",
+      "source_error_message": "ffmpeg clip generation failed",
+      "source_title": "door-open",
+      "source_notes": "match cut ending",
+      "source_scene": "hallway",
+      "source_speaker": null,
+      "source_row": {
+        "shot_number": "003",
+        "start_time": "00:01:02.125",
+        "end_time": "00:01:05.900",
+        "title": "door-open",
+        "notes": "match cut ending",
+        "scene": "hallway"
+      },
+      "frame_evidence": {
+        "first_frame_path": null,
+        "middle_frame_path": null,
+        "middle_frame_paths": [],
+        "last_frame_path": null,
+        "turning_points": []
+      },
+      "reconstruction": {
+        "status": "skipped",
+        "confidence": null,
+        "prompt_language": "en",
+        "combined_prompt": "",
+        "first_frame_prompt": "",
+        "middle_frame_prompt": "",
+        "last_frame_prompt": "",
+        "transition_summary": "",
+        "negative_prompt": "",
+        "continuity_notes": [],
+        "missing_details": [
+          "No usable frame evidence was available."
+        ],
+        "warnings": [
+          "Row skipped because frame evidence is missing."
+        ]
+      }
+    }
+  ]
+}

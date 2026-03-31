@@ -31,6 +31,16 @@ interface Props {
   onToggleQualityCheck: (value: boolean) => void;
   onAnalyze: () => void;
   analyzeButtonLabel?: string;
+  preparseSummary?: {
+    applied: boolean;
+    appliedLabel: string;
+    modeLabel: string;
+    counts: Array<{
+      label: string;
+      value: number;
+    }>;
+    warnings: string[];
+  } | null;
   willAutoSegmentOnAnalyze?: boolean;
   longScriptAnalyzeProgress?: {
     phaseLabel: string;
@@ -79,6 +89,7 @@ const ConfigPanel: React.FC<Props> = ({
   onToggleQualityCheck,
   onAnalyze,
   analyzeButtonLabel,
+  preparseSummary,
   willAutoSegmentOnAnalyze = false,
   longScriptAnalyzeProgress,
   canCancelAnalyze,
@@ -248,6 +259,42 @@ const ConfigPanel: React.FC<Props> = ({
       </div>
 
       <div className="p-6 border-t border-[var(--border-primary)] bg-[var(--bg-primary)]">
+        {preparseSummary && (
+          <div className="mb-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)]/40 px-3 py-3">
+            <div className="flex items-center justify-between gap-3 text-[10px] font-bold tracking-widest text-[var(--text-muted)]">
+              <span>预解析摘要</span>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] normal-case tracking-normal ${
+                preparseSummary.applied
+                  ? 'border-[var(--border-secondary)] text-[var(--text-secondary)]'
+                  : 'border-[var(--border-primary)] text-[var(--text-tertiary)]'
+              }`}>
+                {preparseSummary.appliedLabel}
+              </span>
+            </div>
+
+            <p className="mt-2 text-xs text-[var(--text-secondary)]">
+              模式：{preparseSummary.modeLabel}
+            </p>
+
+            <div className="mt-2 flex flex-wrap gap-2">
+              {preparseSummary.counts.map((item) => (
+                <span
+                  key={item.label}
+                  className="rounded-md border border-[var(--border-primary)] bg-[var(--bg-primary)]/60 px-2 py-1 text-[10px] text-[var(--text-tertiary)]"
+                >
+                  {item.label} <span className="font-mono text-[var(--text-secondary)]">{item.value}</span>
+                </span>
+              ))}
+            </div>
+
+            {preparseSummary.warnings.length > 0 && (
+              <p className="mt-2 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                提示：{preparseSummary.warnings.join('；')}
+              </p>
+            )}
+          </div>
+        )}
+
         {longScriptAnalyzeProgress ? (
           <div className="mb-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-secondary)]/40 px-3 py-3">
             <div className="flex items-center justify-between gap-3 text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">

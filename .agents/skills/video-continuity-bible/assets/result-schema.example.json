@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0.0",
+  "status": "ok",
+  "warnings": [],
+  "source": {
+    "input_summary": "Comedic short-video recreation with two recurring characters, a pizza restaurant, and a prank-to-zombie transformation gag.",
+    "evidence_types": [
+      "storyboard",
+      "dialogue notes",
+      "scene notes"
+    ],
+    "confidence_notes": "Character energy and props are well supported; wardrobe specifics are moderately inferred."
+  },
+  "style": {
+    "title": "Stylized comedic 3D short-form continuity",
+    "style_prompt": "stylized cinematic 3D animation, polished comedy, expressive facial acting, short-video pacing, clean composition, strong continuity",
+    "visual_rules": [
+      "Keep character identity stable across all shots.",
+      "Preserve warm readable lighting and clean comedic staging."
+    ],
+    "negative_rules": [
+      "Do not redesign the cast between shots.",
+      "Do not drift into realistic horror or gritty realism."
+    ]
+  },
+  "characters": [
+    {
+      "id": "char_rumi",
+      "name": "Rumi",
+      "role": "lead",
+      "core_features": [
+        "purple wavy bob haircut",
+        "cute but dramatic expression range",
+        "playful comedic energy"
+      ],
+      "visual_prompt": "young woman, purple wavy bob haircut, expressive face, playful comedic energy, readable silhouette",
+      "continuity_rules": [
+        "Keep hair color and haircut unchanged.",
+        "Keep her expression language highly readable and exaggerated."
+      ]
+    },
+    {
+      "id": "char_jinu",
+      "name": "Jinu",
+      "role": "supporting lead",
+      "core_features": [
+        "young man",
+        "teasing energy",
+        "strong reaction acting"
+      ],
+      "visual_prompt": "young man, neat dark hair, teasing smile, agile body language, strong comedic reaction acting",
+      "continuity_rules": [
+        "Keep him visually lighter and more reactive than the lead.",
+        "Preserve mischievous energy even when frightened."
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "id": "scene_pizza_booth",
+      "name": "Pizza booth",
+      "location": "cozy pizza restaurant booth",
+      "time": "day or warmly lit interior",
+      "atmosphere": "warm, inviting, comedic",
+      "visual_prompt": "cozy pizza restaurant booth, warm lighting, oversized pizza as focal prop, clean comedic interior"
+    }
+  ],
+  "props": [
+    {
+      "id": "prop_oversized_pizza",
+      "name": "Oversized pizza",
+      "category": "food",
+      "description": "A comedic oversized pizza with exaggerated cheese pull.",
+      "visual_prompt": "oversized pizza, exaggerated melted cheese, appetizing comedic food styling"
+    },
+    {
+      "id": "vfx_zombie_face",
+      "name": "Zombie face transformation",
+      "category": "vfx",
+      "description": "Stylized comedic zombie face effect applied to the lead.",
+      "visual_prompt": "stylized zombie face transformation, green skin, pale eyes, comedic shock effect, not realistic gore"
+    }
+  ],
+  "handoff": {
+    "shot_prompt_rules": [
+      "Reuse the style block first, then inject character, scene, and prop blocks before shot-specific action.",
+      "Do not redefine identity anchors in each shot unless continuity actually changes."
+    ],
+    "required_reference_order": [
+      "style",
+      "characters",
+      "scenes",
+      "props",
+      "shot-specific instructions"
+    ],
+    "entity_lookup": {
+      "Rumi": "char_rumi",
+      "Jinu": "char_jinu",
+      "Pizza booth": "scene_pizza_booth",
+      "Oversized pizza": "prop_oversized_pizza",
+      "Zombie face transformation": "vfx_zombie_face"
+    }
+  }
+}

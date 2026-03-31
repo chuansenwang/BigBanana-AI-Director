@@ -1,0 +1,5 @@
+{
+  "schema_version": "v1",
+  "allowed_status_values": ["ok", "partial", "failed"],
+  "status": "partial"
+}

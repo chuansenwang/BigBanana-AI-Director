@@ -34,6 +34,7 @@ import {
 } from './apiCore';
 import { getStylePrompt } from './promptConstants';
 import { generateArtDirection, generateAllCharacterPrompts, generateVisualPrompts } from './visualService';
+import { preparseScriptInput } from './scriptPreparseService';
 import {
   DEFAULT_PROMPT_TEMPLATE_CONFIG,
   getStoryboardCameraMovementReference,
@@ -411,6 +412,8 @@ export const parseScriptStructure = async (
   model: string = 'gpt-5.2',
   abortSignal?: AbortSignal
 ): Promise<ScriptData> => {
+  const preparseResult = preparseScriptInput(rawText);
+  const workingText = preparseResult.applied ? preparseResult.normalizedText : rawText;
   const resolvedChatModel = resolveModel('chat', model);
   const chatProvider = getProviderById(resolvedChatModel?.providerId || '');
   const isProxyChatModel = chatProvider?.connectionMode === 'proxy';
@@ -536,6 +539,19 @@ export const parseScriptStructure = async (
 
   console.log('📝 parseScriptStructure 调用 - 使用模型:', model);
   logScriptProgress('正在解析剧本结构...');
+  if (preparseResult.applied) {
+    const detectedSummary: string[] = [];
+    if (preparseResult.detectedStructure.shotTableCount > 0) {
+      detectedSummary.push(`分镜表 ${preparseResult.detectedStructure.shotTableCount} 组 / ${preparseResult.detectedStructure.shotCount} 条镜头`);
+    }
+    if (preparseResult.detectedStructure.sectionCount > 0) {
+      detectedSummary.push(`结构化章节 ${preparseResult.detectedStructure.sectionCount} 个`);
+    }
+    logScriptProgress(`已应用剧本预解析（${preparseResult.mode}${detectedSummary.length > 0 ? `：${detectedSummary.join('，')}` : ''}）。`);
+  }
+  preparseResult.warnings.forEach((warning) => {
+    logScriptProgress(`预解析提示：${warning.message}`);
+  });
 
   const prompt = `
     Analyze the text and output a JSON object in the language: ${language}.
@@ -549,7 +565,7 @@ export const parseScriptStructure = async (
     ${isProxyChatModel ? '6. Keep each field concise; prefer compact summaries over long quotations.' : ''}
     
     Input:
-    "${rawText.slice(0, maxInputChars)}" // Limit input context if needed
+    "${workingText.slice(0, maxInputChars)}" // Limit input context if needed
     
     Output ONLY valid JSON with this structure:
     {
@@ -583,7 +599,7 @@ export const parseScriptStructure = async (
   const structured = normalizeStructure(parsed);
 
   if (structured.storyParagraphs.length === 0 && structured.scenes.length > 0) {
-    const fallbackParagraphs = rawText
+    const fallbackParagraphs = workingText
       .split(/\n{2,}|\r\n{2,}/g)
       .map(t => t.trim())
       .filter(Boolean)
@@ -2378,13 +2394,29 @@ export const generateShotListForLongScript = async (
     }
   };
 
+  const preparseResult = preparseScriptInput(rawText);
+  const workingText = preparseResult.applied ? preparseResult.normalizedText : rawText;
+  if (preparseResult.applied) {
+    const detectedSummary: string[] = [];
+    if (preparseResult.detectedStructure.shotTableCount > 0) {
+      detectedSummary.push(`分镜表 ${preparseResult.detectedStructure.shotTableCount} 组 / ${preparseResult.detectedStructure.shotCount} 条镜头`);
+    }
+    if (preparseResult.detectedStructure.sectionCount > 0) {
+      detectedSummary.push(`结构化章节 ${preparseResult.detectedStructure.sectionCount} 个`);
+    }
+    logScriptProgress(`长剧本预解析已应用（${preparseResult.mode}${detectedSummary.length > 0 ? `：${detectedSummary.join('，')}` : ''}）。`);
+  }
+  preparseResult.warnings.forEach((warning) => {
+    logScriptProgress(`预解析提示：${warning.message}`);
+  });
+
   const targetSeconds = parseDurationToSeconds(targetDuration) || 60;
   const activeVideoModel = getActiveVideoModel();
   const shotDurationSeconds = Math.max(1, Number(activeVideoModel?.params?.defaultDuration) || 8);
 
   logScriptProgress('长剧本模式已启用：开始规划分块...');
-  const plans = buildLongScriptChunkPlans(rawText, targetSeconds, shotDurationSeconds);
-  validateLongScriptChunkPlanCoverage(rawText, plans);
+  const plans = buildLongScriptChunkPlans(workingText, targetSeconds, shotDurationSeconds);
+  validateLongScriptChunkPlanCoverage(workingText, plans);
   logScriptProgress(`长剧本规划完成：共 ${plans.length} 个分块，目标时长 ${targetSeconds}s`);
 
   const parsedChunks: Array<{
@@ -2500,7 +2532,7 @@ export const generateShotListForLongScript = async (
     });
   }
 
-  validateLongScriptChunkResults(rawText, plans, chunkResults);
+  validateLongScriptChunkResults(workingText, plans, chunkResults);
 
   const mergedShots = reindexMergedLongScriptShots(chunkResults.flatMap(result => result.shots));
   logScriptProgress(`长剧本分镜生成完成：${plans.length} 个分块，共 ${mergedShots.length} 条分镜`);

@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0.0",
+  "status": "ok",
+  "warnings": [],
+  "inputs": {
+    "video_path": "C:/example/source.mp4",
+    "sheet_path": "C:/example/shots.csv",
+    "sheet_format": "csv",
+    "source_duration_seconds": 12.5
+  },
+  "output_dir": "C:/example/storyboard-output",
+  "clip_mode": "accurate",
+  "summary": {
+    "total_rows": 1,
+    "ok_rows": 1,
+    "partial_rows": 0,
+    "failed_rows": 0
+  },
+  "shots": [
+    {
+      "row_index": 1,
+      "shot_number": "001",
+      "start_time": "00:00:03.500",
+      "end_time": "00:00:08.920",
+      "base_name": "S001_00-00-03-500_00-00-08-920",
+      "status": "ok",
+      "clip_path": "C:/example/storyboard-output/clips/S001_00-00-03-500_00-00-08-920.mp4",
+      "first_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_first.png",
+      "middle_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_middle.png",
+      "middle_frame_paths": [
+        "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_middle.png"
+      ],
+      "last_frame_path": "C:/example/storyboard-output/frames/S001_00-00-03-500_00-00-08-920_last.png",
+      "duration_seconds": 5.42,
+      "warnings": [],
+      "error_code": null,
+      "error_message": null,
+      "source_row": {
+        "shot_number": "001",
+        "start_time": "00:00:03.500",
+        "end_time": "00:00:08.920",
+        "title": "opening-shot",
+        "notes": "slow push in",
+        "scene": "street",
+        "speaker": "hero"
+      },
+      "enrichment": {
+        "turning_points": {
+          "enabled": true,
+          "available": true,
+          "status": "ok",
+          "method": "ffmpeg_scene_score",
+          "threshold": 0.12,
+          "min_gap_seconds": 0.35,
+          "max_points": 0,
+          "point_count": 1,
+          "points": [
+            {
+              "index": 1,
+              "timestamp_seconds": 2.1,
+              "frame_path": "C:/example/storyboard-output/keyframes/S001_00-00-03-500_00-00-08-920_turning01_t2-100.png"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

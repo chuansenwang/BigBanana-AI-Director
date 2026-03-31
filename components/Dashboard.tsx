@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Trash2, Loader2, Folder, ChevronRight, Calendar, AlertTriangle, X, Cpu, Archive, Search, SearchCheck, Sparkles, LayoutPanelTop, Users, MapPin, Package, Database, Settings, Sun, Moon, Film, ExternalLink, User, Link as LinkIcon, Wand2 } from 'lucide-react';
-import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo } from '../types';
+import { Plus, Trash2, Loader2, Folder, ChevronDown, ChevronRight, Calendar, AlertTriangle, X, Cpu, Archive, Search, SearchCheck, Sparkles, LayoutPanelTop, Users, MapPin, Package, Database, Settings, Sun, Moon, Film, ExternalLink, User, Link as LinkIcon, Wand2 } from 'lucide-react';
+import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo, BenchmarkDownloadArtifact } from '../types';
 import { getAllSeriesProjects, createNewSeriesProject, saveSeriesProject, deleteSeriesProject, createNewSeries, saveSeries, createNewEpisode, saveEpisode, getAllAssetLibraryItems, deleteAssetFromLibrary, exportIndexedDBData, getAllBenchmarkVideos, saveBenchmarkVideo, deleteBenchmarkVideo } from '../services/storageService';
 import { useAlert } from './GlobalAlert';
 import { useTheme } from '../contexts/ThemeContext';
@@ -11,14 +11,587 @@ import {
   globalBackupFileName,
 } from '../hooks/useBackupTransfer';
 import { DIRECTOR_HUB_URL } from '../constants/links';
-import { analyzeYouTubeBenchmark, fetchYouTubeBenchmarkIntake } from '../services/youtubeBenchmarkService';
+import { analyzeYouTubeBenchmark, downloadYouTubeBenchmarkVideo, fetchYouTubeBenchmarkIntake } from '../services/youtubeBenchmarkService';
 import { importBenchmarkToProject } from '../services/benchmarkImportService';
+import { loadArtifactStorageUserConfig } from '../services/artifactStorageConfigService';
 
 interface Props {
   onOpenProject: (project: ProjectState) => void;
   onShowOnboarding?: () => void;
   onShowModelConfig?: () => void;
 }
+
+const hasBenchmarkText = (value?: string | number | null): boolean => {
+  if (value === null || value === undefined) return false;
+  return String(value).trim().length > 0;
+};
+
+const formatBenchmarkDuration = (seconds?: number): string | null => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+
+  const totalSeconds = Math.round(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  const timeParts = hours > 0
+    ? [hours, minutes, remainingSeconds]
+    : [minutes, remainingSeconds];
+
+  return `${timeParts.map((part) => String(part).padStart(2, '0')).join(':')}（约 ${totalSeconds} 秒）`;
+};
+
+const formatByteCount = (value?: number): string | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  if (value < 1024) return `${Math.round(value)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 100 ? size.toFixed(0) : size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${units[unitIndex]}`;
+};
+
+const formatEtaLabel = (seconds?: number): string | null => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null;
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return `${mins} 分 ${secs.toString().padStart(2, '0')} 秒`;
+};
+
+const mergeDownloadArtifact = (
+  base?: BenchmarkDownloadArtifact,
+  incoming?: BenchmarkDownloadArtifact,
+): BenchmarkDownloadArtifact | undefined => {
+  if (!base && !incoming) return undefined;
+  return {
+    ...(base || {}),
+    ...(incoming || {}),
+    status: incoming?.status ?? base?.status ?? 'pending',
+    warnings: incoming?.warnings || base?.warnings || [],
+  };
+};
+
+const getBenchmarkDownloadStatusLabel = (benchmark: Pick<BenchmarkVideo, 'status' | 'downloadArtifact'>): string => {
+  const downloadStatus = benchmark.downloadArtifact?.status;
+  if (downloadStatus === 'downloading') return '下载中';
+  if (downloadStatus === 'ready') return benchmark.status === 'completed' ? '已落盘' : '已下载';
+  if (downloadStatus === 'failed') return '下载失败';
+  if (downloadStatus === 'pending' && benchmark.status === 'analyzing') return '等待下载';
+  return '未下载';
+};
+
+const appendBenchmarkSection = (
+  lines: string[],
+  title: string,
+  items: Array<[string, string | number | null | undefined]>
+) => {
+  const sectionLines = items
+    .filter(([, value]) => hasBenchmarkText(value))
+    .map(([label, value]) => `${label}：${String(value).trim()}`);
+
+  if (sectionLines.length === 0) {
+    return;
+  }
+
+  if (lines.length > 0) {
+    lines.push('');
+  }
+
+  lines.push(title);
+  lines.push(...sectionLines);
+};
+
+const getBenchmarkBreakdownDisplayText = (benchmark: BenchmarkVideo | null): string => {
+  if (!benchmark) {
+    return '';
+  }
+
+  const breakdownReportText = benchmark.breakdownReport?.trim();
+  if (breakdownReportText) {
+    return breakdownReportText;
+  }
+
+  const lines: string[] = [];
+  const metrics = benchmark.metrics;
+  const shots = benchmark.deconstructResult;
+  const warnings = benchmark.warnings?.filter((warning) => hasBenchmarkText(warning)) || [];
+  const analysisModeLabel = benchmark.status !== 'completed'
+    ? '分析中'
+    : benchmark.analysisMode === 'metadata'
+      ? benchmark.fallbackReason === 'missing_api_key'
+        ? '降级分析'
+        : '元数据分析'
+      : '完整分析';
+  const transcriptStatusLabel = benchmark.transcriptStatus === 'available'
+    ? `可用${benchmark.sourceMeta?.transcriptLanguage ? ` · ${benchmark.sourceMeta.transcriptLanguage}` : ''}`
+    : benchmark.transcriptStatus === 'error'
+      ? '获取失败'
+      : '不可用';
+
+  appendBenchmarkSection(lines, '报告概览', [
+    ['标题', benchmark.title],
+    ['状态', benchmark.status],
+    ['分析方式', analysisModeLabel],
+    ['来源链接', benchmark.sourceMeta?.canonicalUrl || benchmark.url],
+    ['分析依据', benchmark.analysisBasis],
+    ['错误信息', benchmark.errorMessage],
+  ]);
+
+  appendBenchmarkSection(lines, '来源信息', [
+    ['频道', benchmark.sourceMeta?.channelTitle],
+    ['字幕状态', transcriptStatusLabel],
+    ['视频时长', formatBenchmarkDuration(benchmark.sourceMeta?.durationSeconds)],
+    ['播放量', typeof benchmark.sourceMeta?.viewCount === 'number' ? benchmark.sourceMeta.viewCount.toLocaleString('zh-CN') : null],
+    ['点赞', typeof benchmark.sourceMeta?.likeCount === 'number' ? benchmark.sourceMeta.likeCount.toLocaleString('zh-CN') : null],
+  ]);
+
+  appendBenchmarkSection(lines, '本地下载', [
+    ['下载状态', getBenchmarkDownloadStatusLabel(benchmark)],
+    ['本地路径', benchmark.downloadArtifact?.localPath],
+    ['输出目录', benchmark.downloadArtifact?.outputDirectory],
+    ['下载错误', benchmark.downloadArtifact?.errorMessage],
+  ]);
+
+  if (warnings.length > 0) {
+    lines.push('');
+    lines.push('风险提醒');
+    warnings.forEach((warning, index) => {
+      lines.push(`${index + 1}. ${warning.trim()}`);
+    });
+  }
+
+  if (metrics) {
+    appendBenchmarkSection(lines, '结构化分析摘要 / T0', [
+      ['播放量判断', metrics.t0_playCount],
+      ['故事脚本', metrics.t0_storyScript],
+      ['爆款因子', metrics.t0_viralFactors],
+      ['同质化程度', metrics.t0_homogenization],
+    ]);
+
+    appendBenchmarkSection(lines, '结构化分析摘要 / T1', [
+      ['前三秒内容', metrics.t1_first3sContent],
+      ['前三秒画面', metrics.t1_first3sVisuals],
+      ['总时长', metrics.t1_duration],
+      ['分镜个数', metrics.t1_shotCount],
+      ['分镜时长', metrics.t1_shotDuration],
+      ['反转数量', metrics.t1_twistCount],
+      ['形象主体', metrics.t1_mainSubject],
+      ['节奏快慢', metrics.t1_pacing],
+    ]);
+
+    appendBenchmarkSection(lines, '结构化分析摘要 / T2', [
+      ['画风', metrics.t2_artStyle],
+      ['音乐', metrics.t2_music],
+      ['音效', metrics.t2_soundEffects],
+      ['画面亮度/艳度', metrics.t2_visualBrightness],
+      ['表情与肢体生动度', metrics.t2_expressionLiveliness],
+      ['动作幅度', metrics.t2_motionMagnitude],
+      ['转场剪辑处理', metrics.t2_transitions],
+      ['清晰度与画质', metrics.t2_clarity],
+      ['配音', metrics.t2_voiceOver],
+      ['人群倾向', metrics.t2_demographics],
+      ['细节与 Bug', metrics.t2_errors],
+    ]);
+
+    appendBenchmarkSection(lines, '结构化分析摘要 / T3', [
+      ['主观观看意愿', metrics.t3_subjectiveInterest],
+      ['发布时间', metrics.t3_publishTime],
+      ['赛道专属指标', metrics.t3_customMetrics],
+    ]);
+  }
+
+  if (shots?.length) {
+    lines.push('');
+    lines.push(`分镜拆解记录（共 ${shots.length} 镜头）`);
+    shots.forEach((shot, index) => {
+      const shotLines = [
+        hasBenchmarkText(shot.time) ? `时间：${shot.time}` : null,
+        hasBenchmarkText(shot.desc) ? `镜头说明：${shot.desc}` : null,
+        hasBenchmarkText(shot.videoPrompt) ? `视频提示词：${shot.videoPrompt}` : null,
+        hasBenchmarkText(shot.firstFramePrompt) ? `首帧提示词：${shot.firstFramePrompt}` : null,
+        hasBenchmarkText(shot.lastFramePrompt) ? `尾帧提示词：${shot.lastFramePrompt}` : null,
+        hasBenchmarkText(shot.adjustment) ? `调整建议：${shot.adjustment}` : null,
+      ].filter((item): item is string => item !== null);
+
+      if (shotLines.length === 0) {
+        return;
+      }
+
+      lines.push('');
+      lines.push(`镜头 ${shot.id || index + 1}`);
+      lines.push(...shotLines);
+    });
+  }
+
+  if (lines.length === 0) {
+    return '当前记录暂无可展示的拆解方案。该记录可能仍在分析中，或仅保留了基础来源信息。';
+  }
+
+  return lines.join('\n');
+};
+
+type MockSliceFrameTone = 'warning' | 'accent' | 'success';
+
+type MockSliceFrameLabel = '首帧' | '中段' | '尾帧';
+
+interface MockSliceFrame {
+  id: string;
+  label: string;
+  timecode: string;
+  caption: string;
+  tone: MockSliceFrameTone;
+}
+
+interface MockSliceShot {
+  id: string;
+  indexLabel: string;
+  startSecond: number;
+  endSecond: number;
+  durationSeconds: number;
+  title: string;
+  timeRange: string;
+  durationLabel: string;
+  beatSummary: string;
+  transition: string;
+  cameraLanguage: string;
+  emotionAnchor: string;
+  soundDesign: string;
+  promptFocus: string;
+  frames: MockSliceFrame[];
+}
+
+interface MockSliceFrameTemplate {
+  label: MockSliceFrameLabel;
+  timeOffsetSeconds: number;
+  caption: string;
+  tone: MockSliceFrameTone;
+}
+
+interface MockSliceShotTemplate {
+  title: string;
+  durationSeconds: number;
+  beatSummary: string;
+  transition: string;
+  cameraLanguage: string;
+  emotionAnchor: string;
+  soundDesign: string;
+  promptFocus: string;
+  frames: MockSliceFrameTemplate[];
+}
+
+interface GeneratedMockSliceBlueprint {
+  title: string;
+  beatSummary: string;
+  transition: string;
+  cameraLanguage: string;
+  emotionAnchor: string;
+  soundDesign: string;
+  promptFocus: string;
+  frameCaptions: [string, string, string];
+}
+
+const padMockSliceNumber = (value: number): string => String(value).padStart(2, '0');
+
+const formatMockSliceTimestamp = (seconds: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${padMockSliceNumber(minutes)}:${padMockSliceNumber(remainingSeconds)}`;
+};
+
+const formatMockSliceTimecode = (seconds: number): string => {
+  const totalTenths = Math.max(0, Math.round(seconds * 10));
+  const minutes = Math.floor(totalTenths / 600);
+  const remainingTenths = totalTenths % 600;
+  const remainingSeconds = Math.floor(remainingTenths / 10);
+  const tenths = remainingTenths % 10;
+  return `${padMockSliceNumber(minutes)}:${padMockSliceNumber(remainingSeconds)}.${tenths}`;
+};
+
+const buildMockSliceShot = (
+  index: number,
+  startSecond: number,
+  template: MockSliceShotTemplate
+): MockSliceShot => {
+  const shotId = `mock-shot-${padMockSliceNumber(index)}`;
+  const endSecond = startSecond + template.durationSeconds;
+
+  return {
+    id: shotId,
+    indexLabel: padMockSliceNumber(index),
+    startSecond,
+    endSecond,
+    durationSeconds: template.durationSeconds,
+    title: template.title,
+    timeRange: `${formatMockSliceTimestamp(startSecond)} - ${formatMockSliceTimestamp(endSecond)}`,
+    durationLabel: `${template.durationSeconds} 秒`,
+    beatSummary: template.beatSummary,
+    transition: template.transition,
+    cameraLanguage: template.cameraLanguage,
+    emotionAnchor: template.emotionAnchor,
+    soundDesign: template.soundDesign,
+    promptFocus: template.promptFocus,
+    frames: template.frames.map((frame, frameIndex) => ({
+      id: `${shotId}-frame-${padMockSliceNumber(frameIndex + 1)}`,
+      label: frame.label,
+      timecode: formatMockSliceTimecode(startSecond + Math.min(template.durationSeconds, Math.max(0, frame.timeOffsetSeconds))),
+      caption: frame.caption,
+      tone: frame.tone,
+    })),
+  };
+};
+
+const AUTHORED_MOCK_SLICE_SHOT_TEMPLATES: MockSliceShotTemplate[] = [
+  {
+    title: '冷开场反差入镜',
+    durationSeconds: 4,
+    beatSummary: '先抛结果、后补原因，让观众在第一眼抓到冲突。',
+    transition: '黑场硬切，开门瞬间直接入画。',
+    cameraLanguage: '中近景推进，镜头跟着视线轻压。',
+    emotionAnchor: '紧张里带一点确认感，压住但不失控。',
+    soundDesign: '轻脉冲低频 + 门轴金属响，快速拉起注意力。',
+    promptFocus: '保留屏幕冷光与人物脸侧高光反差，先建立信息密度。',
+    frames: [
+      { label: '首帧', timeOffsetSeconds: 0.2, caption: '门刚打开，冷光先打在人物脸侧，画面带出第一层悬念。', tone: 'warning' },
+      { label: '中段', timeOffsetSeconds: 2.1, caption: '镜头压近到胸像，主角抬眼确认目标，节奏开始收紧。', tone: 'accent' },
+      { label: '尾帧', timeOffsetSeconds: 3.8, caption: '屏幕反光切到面部高亮，留下一个可无缝硬切的落点。', tone: 'success' },
+    ],
+  },
+  {
+    title: '信息抛出与视线锁定',
+    durationSeconds: 5,
+    beatSummary: '用一组连续视线切换，把核心信息稳定送到观众面前。',
+    transition: '延续上一镜头尾帧的反光区域做视觉接缝。',
+    cameraLanguage: '肩后视角切到正反打，保持注视方向统一。',
+    emotionAnchor: '从疑惑进入判断，节奏更像在读一条关键消息。',
+    soundDesign: '底噪压低，加入轻微提示音，把信息节点做得更清晰。',
+    promptFocus: '让视线方向、屏幕文字区域和手部动作形成同一视觉路径。',
+    frames: [
+      { label: '首帧', timeOffsetSeconds: 0.1, caption: '肩后视角带出屏幕内容，人物肩线稳定画面重心。', tone: 'accent' },
+      { label: '中段', timeOffsetSeconds: 2.0, caption: '切到正面近景，眼神短暂停顿，信息被真正“看见”。', tone: 'success' },
+      { label: '尾帧', timeOffsetSeconds: 4.7, caption: '指尖滑过屏幕边缘，为下一个动作镜头留出明确方向。', tone: 'warning' },
+    ],
+  },
+  {
+    title: '动作补偿与节奏抬升',
+    durationSeconds: 5,
+    beatSummary: '信息确认后立刻补动作，让叙事从理解进入执行。',
+    transition: '利用手部运动方向做顺势切换，避免停顿感。',
+    cameraLanguage: '侧向跟拍 + 轻摇镜，制造紧跟感和推动力。',
+    emotionAnchor: '决心感开始上升，画面不再犹豫。',
+    soundDesign: '脚步声和布料摩擦被抬到前景，强化执行感。',
+    promptFocus: '动作线要清楚，主体移动轨迹比背景细节更重要。',
+    frames: [
+      { label: '首帧', timeOffsetSeconds: 0.2, caption: '人物侧身起步，肩颈线先动，画面开始带出方向性。', tone: 'success' },
+      { label: '中段', timeOffsetSeconds: 2.4, caption: '跟拍速度抬高，背景被轻微拉开，动作动势变得更明确。', tone: 'warning' },
+      { label: '尾帧', timeOffsetSeconds: 4.9, caption: '在一个偏强的身体停顿处收镜，为下一个重点镜头蓄力。', tone: 'accent' },
+    ],
+  },
+  {
+    title: '收束定格与情绪回钩',
+    durationSeconds: 5,
+    beatSummary: '用短暂停顿回钩情绪，让整段切片在尾部留下记忆点。',
+    transition: '从动作余势直接切静态构图，形成明显收束。',
+    cameraLanguage: '镜头减速后停在半身构图，留足封面感。',
+    emotionAnchor: '从执行切回情绪，让观众记住最后的表情信号。',
+    soundDesign: '音乐保留延音，环境声渐退，结尾更干净。',
+    promptFocus: '让表情、肩线和背景留白共同构成结尾主视觉。',
+    frames: [
+      { label: '首帧', timeOffsetSeconds: 0.3, caption: '动作刚结束，呼吸感仍在，画面保留一点余势。', tone: 'warning' },
+      { label: '中段', timeOffsetSeconds: 2.2, caption: '镜头减速停稳，面部表情成为新的视觉中心。', tone: 'accent' },
+      { label: '尾帧', timeOffsetSeconds: 4.8, caption: '背景留白与人物轮廓形成封面式定格，便于继续衍生封面图。', tone: 'success' },
+    ],
+  },
+];
+
+const GENERATED_MOCK_SLICE_DURATION_PATTERN = [4, 5, 4, 5, 4, 5, 4, 5];
+const GENERATED_MOCK_SLICE_PHASE_LABELS = ['推进段', '逼近段', '翻转段', '收束段'];
+const GENERATED_MOCK_SLICE_BLUEPRINTS: GeneratedMockSliceBlueprint[] = [
+  {
+    title: '空间压迫升级',
+    beatSummary: '用连续位移把空间层级和目标压力一起推进。',
+    transition: '以前景擦切接入下一段走位，保证横向速度不断。',
+    cameraLanguage: '手持侧跟 + 轻推近，保持纵深压迫。',
+    emotionAnchor: '搜寻感被拉紧，观众开始预感到更大的阻力。',
+    soundDesign: '脚步混响抬高，环境低频稳稳托住推进感。',
+    promptFocus: '优先保留走廊纵深、人物轮廓和前景遮挡关系。',
+    frameCaptions: [
+      '前景遮挡掠过镜头边缘，空间压迫感先被建立。',
+      '主体穿过第二层景别，纵深关系开始真正工作。',
+      '在走位快到尽头时收住，给下一个决策镜头留接口。',
+    ],
+  },
+  {
+    title: '手部特写与证据强化',
+    beatSummary: '把关键物件单独抬出来，确保观众不会漏掉信息锚点。',
+    transition: '沿着动作末端切到细节特写，让焦点自然落下。',
+    cameraLanguage: '特写微推进，景深压浅，视觉注意力更集中。',
+    emotionAnchor: '确认感更强，像是终于抓到真正有效的线索。',
+    soundDesign: '轻敲、摩擦和提示音被前置，形成细节层次。',
+    promptFocus: '把手势、物件边缘高光和文字区域做成同一焦点。',
+    frameCaptions: [
+      '手部动作刚触到物件，信息锚点第一次被明确提出。',
+      '镜头轻推到最清晰的位置，证据细节成为唯一中心。',
+      '手势离开前留出一瞬静止，方便衔接后续反应镜头。',
+    ],
+  },
+  {
+    title: '反应切换与信息回传',
+    beatSummary: '让人物反应接住刚出现的信息，把理解过程显性化。',
+    transition: '借由视线方向顺切，保持观众的注意力不掉线。',
+    cameraLanguage: '正反打切换，镜头语言尽量克制，突出眼神变化。',
+    emotionAnchor: '从接收信息切到内心判断，紧张感更人性化。',
+    soundDesign: '环境底噪稍微抽空，让呼吸和小动作更可感。',
+    promptFocus: '优先刻画眼神停顿、面部肌肉和视线落点。',
+    frameCaptions: [
+      '人物先给出短暂停顿，像在把新信息快速吞下去。',
+      '正面近景让表情变化完全暴露，判断过程被看见。',
+      '目光转向下一处目标，给动作接力提供明确方向。',
+    ],
+  },
+  {
+    title: '环境插切与威胁预告',
+    beatSummary: '插入空间信息，让未出现的风险先在观众脑中成形。',
+    transition: '用声音先行，再让画面补上空间威胁。',
+    cameraLanguage: '静态广角 + 轻微摇移，强调环境的先知感。',
+    emotionAnchor: '不安感被放大，叙事开始出现看不见的对手。',
+    soundDesign: '远处回响与空气噪点增多，制造预警氛围。',
+    promptFocus: '优先经营留白、门缝、反光和背景深处的未知信息。',
+    frameCaptions: [
+      '环境先空出来，观众会本能寻找潜在威胁的位置。',
+      '轻微摇移把风险区域推入中心，预警感被悄悄放大。',
+      '在尚未揭露真相前收住，方便下一镜直接接危机响应。',
+    ],
+  },
+  {
+    title: '关系对峙与镜面反打',
+    beatSummary: '把人物与对手或信息源放到同一张心理桌面上。',
+    transition: '借助对视方向或镜面反光，形成稳定切换节奏。',
+    cameraLanguage: '中近景对切，镜面元素辅助建立双向张力。',
+    emotionAnchor: '压抑与挑衅同时出现，气氛开始变得更锋利。',
+    soundDesign: '音乐延音拉长，局部金属或玻璃质感被凸显。',
+    promptFocus: '保持对视轴线、轮廓边光和镜面层次的清晰度。',
+    frameCaptions: [
+      '人物先被放在镜面或反光边缘，关系张力开始露头。',
+      '对视轴线被锁住，观众能感到双方都在等待先手。',
+      '在情绪快要溢出前停住，为下一次动作释放蓄力。',
+    ],
+  },
+  {
+    title: '决断动作与节奏加速',
+    beatSummary: '让人物不再停留在判断层，而是直接做出行动。',
+    transition: '从视线落点切到动作起点，形成明显提速。',
+    cameraLanguage: '近景跟拍 + 快速转向，给画面更多执行感。',
+    emotionAnchor: '犹豫被压平，画面进入更强的目标导向。',
+    soundDesign: '动作撞击声和衣料摩擦被提到前景，节奏感更硬。',
+    promptFocus: '强调起步瞬间、身体倾角和动作方向的明确性。',
+    frameCaptions: [
+      '动作起点清楚可见，人物像是终于下定了决心。',
+      '镜头跟着转向，执行感在中段被彻底推高。',
+      '在一个偏强的动作停点收镜，方便后续继续接力。',
+    ],
+  },
+  {
+    title: '结果揭示与视觉回报',
+    beatSummary: '把前面积累的动作和信息兑换成一次明确回报。',
+    transition: '从高压动作切到结果展示，形成情绪落差。',
+    cameraLanguage: '先稳后推，结果展示时留出足够辨识时间。',
+    emotionAnchor: '短暂释放出现，但底层紧张并没有完全消失。',
+    soundDesign: '音乐给出一个更亮的和声节点，随后立刻收回。',
+    promptFocus: '保证结果对象、人物反应和背景留白同时可读。',
+    frameCaptions: [
+      '结果对象第一次被完整看见，观众终于拿到回报。',
+      '人物反应跟上来，让回报不只是信息而是情绪兑现。',
+      '留出一个可暂停浏览的稳定落点，方便继续衍生操作。',
+    ],
+  },
+  {
+    title: '余韵缓冲与下段挂钩',
+    beatSummary: '用短暂缓冲整理信息密度，同时把下一段入口埋好。',
+    transition: '从强动作退到半静止，让观众有机会重新聚焦。',
+    cameraLanguage: '半身构图缓停，镜头存在感降低，情绪信号更突出。',
+    emotionAnchor: '表面回稳，但观众能感到后续马上还会再起波澜。',
+    soundDesign: '保留环境延音和细小呼吸声，营造尾韵。',
+    promptFocus: '让留白、表情和构图平衡一起构成可复用封面感。',
+    frameCaptions: [
+      '动作余势还没完全退掉，画面先给出短暂的呼吸位。',
+      '构图回到稳定状态，信息密度被重新整理。',
+      '最后一个眼神或停顿把后续入口轻轻挂住。',
+    ],
+  },
+];
+
+const createGeneratedMockSliceShotTemplate = (shotNumber: number): MockSliceShotTemplate => {
+  const generatedIndex = shotNumber - AUTHORED_MOCK_SLICE_SHOT_TEMPLATES.length - 1;
+  const blueprint = GENERATED_MOCK_SLICE_BLUEPRINTS[generatedIndex % GENERATED_MOCK_SLICE_BLUEPRINTS.length];
+  const phaseLabel = GENERATED_MOCK_SLICE_PHASE_LABELS[Math.floor(generatedIndex / 7) % GENERATED_MOCK_SLICE_PHASE_LABELS.length];
+  const durationSeconds = GENERATED_MOCK_SLICE_DURATION_PATTERN[generatedIndex % GENERATED_MOCK_SLICE_DURATION_PATTERN.length];
+  const tailOffset = Math.max(durationSeconds - 0.2, 0.2);
+
+  return {
+    title: `${phaseLabel} · ${blueprint.title}`,
+    durationSeconds,
+    beatSummary: blueprint.beatSummary,
+    transition: blueprint.transition,
+    cameraLanguage: blueprint.cameraLanguage,
+    emotionAnchor: blueprint.emotionAnchor,
+    soundDesign: blueprint.soundDesign,
+    promptFocus: blueprint.promptFocus,
+    frames: [
+      { label: '首帧', timeOffsetSeconds: 0.2, caption: blueprint.frameCaptions[0], tone: 'warning' },
+      { label: '中段', timeOffsetSeconds: durationSeconds / 2, caption: blueprint.frameCaptions[1], tone: 'accent' },
+      { label: '尾帧', timeOffsetSeconds: tailOffset, caption: blueprint.frameCaptions[2], tone: 'success' },
+    ],
+  };
+};
+
+const MOCK_SLICE_SHOT_TEMPLATES: MockSliceShotTemplate[] = [
+  ...AUTHORED_MOCK_SLICE_SHOT_TEMPLATES,
+  ...Array.from({ length: 30 - AUTHORED_MOCK_SLICE_SHOT_TEMPLATES.length }, (_, index) => createGeneratedMockSliceShotTemplate(index + AUTHORED_MOCK_SLICE_SHOT_TEMPLATES.length + 1)),
+];
+
+const MOCK_SLICE_SHOTS: MockSliceShot[] = MOCK_SLICE_SHOT_TEMPLATES.reduce<MockSliceShot[]>((shots, template, index) => {
+  const startSecond = shots[shots.length - 1]?.endSecond ?? 0;
+  shots.push(buildMockSliceShot(index + 1, startSecond, template));
+  return shots;
+}, []);
+
+const MOCK_SLICE_TOTAL_FRAMES = MOCK_SLICE_SHOTS.reduce((total, shot) => total + shot.frames.length, 0);
+const MOCK_SLICE_TOTAL_COVERAGE_SECONDS = MOCK_SLICE_SHOTS.length > 0
+  ? MOCK_SLICE_SHOTS[MOCK_SLICE_SHOTS.length - 1].endSecond - MOCK_SLICE_SHOTS[0].startSecond
+  : 0;
+const MOCK_SLICE_TOTAL_COVERAGE_LABEL = formatMockSliceTimestamp(MOCK_SLICE_TOTAL_COVERAGE_SECONDS);
+
+const DEFAULT_MOCK_SLICE_SHOT_ID = MOCK_SLICE_SHOTS[0]?.id ?? '';
+
+const getMockSliceFrameToneClasses = (tone: MockSliceFrameTone) => {
+  switch (tone) {
+    case 'warning':
+      return {
+        badge: 'bg-[var(--warning)]/12 text-[var(--warning)]',
+        glow: 'bg-[var(--warning)]/18',
+        line: 'bg-[var(--warning)]/55',
+      };
+    case 'success':
+      return {
+        badge: 'bg-[var(--success-bg)] text-[var(--success-text)]',
+        glow: 'bg-[var(--success-text)]/18',
+        line: 'bg-[var(--success-text)]/55',
+      };
+    case 'accent':
+    default:
+      return {
+        badge: 'bg-[var(--accent)]/12 text-[var(--accent)]',
+        glow: 'bg-[var(--accent)]/18',
+        line: 'bg-[var(--accent)]/55',
+      };
+  }
+};
 
 const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const { showAlert } = useAlert();
@@ -45,6 +618,12 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const [isDeconstructing, setIsDeconstructing] = useState(false);
   const [benchmarkList, setBenchmarkList] = useState<BenchmarkVideo[]>([]);
   const [currentBenchmarkId, setCurrentBenchmarkId] = useState<string | null>(null);
+  const [isEditingBenchmarkBreakdown, setIsEditingBenchmarkBreakdown] = useState(false);
+  const [isBenchmarkBreakdownExpanded, setIsBenchmarkBreakdownExpanded] = useState(false);
+  const [benchmarkBreakdownDraft, setBenchmarkBreakdownDraft] = useState('');
+  const [isSavingBenchmarkBreakdown, setIsSavingBenchmarkBreakdown] = useState(false);
+  const [selectedMockSliceShotId, setSelectedMockSliceShotId] = useState(DEFAULT_MOCK_SLICE_SHOT_ID);
+  const [activeBenchmarkDownloadArtifacts, setActiveBenchmarkDownloadArtifacts] = useState<Record<string, BenchmarkDownloadArtifact>>({});
 
   const loadBenchmarks = async () => {
     try {
@@ -55,13 +634,38 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     }
   };
 
+  const updateActiveBenchmarkDownloadArtifact = (benchmarkId: string, artifact: BenchmarkDownloadArtifact) => {
+    setActiveBenchmarkDownloadArtifacts((prev) => ({
+      ...prev,
+      [benchmarkId]: mergeDownloadArtifact(prev[benchmarkId], artifact) || artifact,
+    }));
+  };
+
+  const clearActiveBenchmarkDownloadArtifact = (benchmarkId: string) => {
+    setActiveBenchmarkDownloadArtifacts((prev) => {
+      if (!(benchmarkId in prev)) return prev;
+      const next = { ...prev };
+      delete next[benchmarkId];
+      return next;
+    });
+  };
+
   useEffect(() => {
     loadBenchmarks();
   }, []);
 
   const currentBenchmark = currentBenchmarkId ? benchmarkList.find(b => b.id === currentBenchmarkId) : null;
-  const deconstructResult = currentBenchmark?.deconstructResult || null;
   const getBenchmarkStatusLabel = (item: BenchmarkVideo) => {
+    if (item.status === 'analyzing') {
+      return item.downloadArtifact?.status === 'downloading'
+        ? '下载中'
+        : item.downloadArtifact?.status === 'ready'
+          ? '解构中'
+          : '分析中';
+    }
+    if (item.status === 'failed' && item.downloadArtifact?.status === 'failed') {
+      return '下载失败';
+    }
     if (item.status !== 'completed') return item.status;
     if (item.deconstructResult?.length) return `${item.deconstructResult.length} 镜头`;
     if (item.analysisMode === 'metadata') return item.fallbackReason === 'missing_api_key' ? '降级分析' : '元数据分析';
@@ -72,14 +676,80 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     : currentBenchmark?.transcriptStatus === 'error'
       ? '获取失败'
       : '不可用';
+  const currentDownloadArtifact = currentBenchmark
+    ? mergeDownloadArtifact(currentBenchmark.downloadArtifact, activeBenchmarkDownloadArtifacts[currentBenchmark.id])
+    : undefined;
   const analysisModeLabel = currentBenchmark?.status !== 'completed'
-    ? '分析中'
+    ? currentDownloadArtifact?.status === 'downloading'
+      ? '下载中'
+      : currentDownloadArtifact?.status === 'ready'
+        ? '解构中'
+        : '分析中'
     : currentBenchmark?.analysisMode === 'metadata'
       ? currentBenchmark?.fallbackReason === 'missing_api_key'
         ? '降级分析'
         : '元数据分析'
       : '完整分析';
+  const downloadStatusLabel = currentBenchmark
+    ? getBenchmarkDownloadStatusLabel({ status: currentBenchmark.status, downloadArtifact: currentDownloadArtifact })
+    : '未下载';
   const shouldShowModelConfigAction = currentBenchmark?.fallbackReason === 'missing_api_key' && !!onShowModelConfig;
+  const benchmarkBreakdownDisplayText = getBenchmarkBreakdownDisplayText(currentBenchmark);
+  const isBenchmarkBreakdownEditable = !!currentBenchmark && currentBenchmark.status !== 'analyzing';
+  const selectedMockSliceShot = MOCK_SLICE_SHOTS.find((shot) => shot.id === selectedMockSliceShotId) || MOCK_SLICE_SHOTS[0] || null;
+
+  useEffect(() => {
+    setIsEditingBenchmarkBreakdown(false);
+    setIsBenchmarkBreakdownExpanded(false);
+    setIsSavingBenchmarkBreakdown(false);
+    setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
+  }, [currentBenchmarkId, currentBenchmark?.lastModified, benchmarkBreakdownDisplayText]);
+
+  useEffect(() => {
+    setSelectedMockSliceShotId(DEFAULT_MOCK_SLICE_SHOT_ID);
+  }, [currentBenchmarkId]);
+
+  const handleStartEditBenchmarkBreakdown = () => {
+    if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
+      return;
+    }
+
+    setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
+    setIsBenchmarkBreakdownExpanded(true);
+    setIsEditingBenchmarkBreakdown(true);
+  };
+
+  const handleCancelEditBenchmarkBreakdown = () => {
+    setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
+    setIsEditingBenchmarkBreakdown(false);
+    setIsBenchmarkBreakdownExpanded(false);
+  };
+
+  const handleSaveBenchmarkBreakdown = async () => {
+    if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
+      return;
+    }
+
+    const nextBreakdownReport = benchmarkBreakdownDraft.trim() || undefined;
+    const benchmarkId = currentBenchmark.id;
+
+    setIsSavingBenchmarkBreakdown(true);
+    try {
+      await saveBenchmarkVideo({
+        ...currentBenchmark,
+        breakdownReport: nextBreakdownReport,
+      });
+      await loadBenchmarks();
+      setCurrentBenchmarkId(benchmarkId);
+      setIsEditingBenchmarkBreakdown(false);
+      setIsBenchmarkBreakdownExpanded(false);
+      showAlert('视频拆解方案已保存', { type: 'success' });
+    } catch (error) {
+      showAlert(`保存拆解方案失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+    } finally {
+      setIsSavingBenchmarkBreakdown(false);
+    }
+  };
 
   const handleDeconstruct = async () => {
     if (!videoLink.trim()) {
@@ -99,6 +769,10 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       status: 'analyzing',
       deconstructResult: null,
       warnings: [],
+      downloadArtifact: {
+        status: 'pending',
+        warnings: [],
+      },
     };
     await saveBenchmarkVideo(newVideo);
     setCurrentBenchmarkId(newId);
@@ -128,12 +802,48 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       await saveBenchmarkVideo(partialVideo);
       await loadBenchmarks();
 
+      const artifactStorageConfig = loadArtifactStorageUserConfig();
+      partialVideo = {
+        ...partialVideo,
+        downloadArtifact: {
+          status: 'downloading',
+          warnings: partialVideo.downloadArtifact?.warnings || [],
+        },
+      };
+      await saveBenchmarkVideo(partialVideo);
+      await loadBenchmarks();
+      updateActiveBenchmarkDownloadArtifact(newId, partialVideo.downloadArtifact);
+
+      const downloadArtifact = await downloadYouTubeBenchmarkVideo({
+        url: intake.canonicalUrl,
+        videoId: intake.videoId,
+        artifactStorageConfig,
+      }, {
+        onEvent: (event) => {
+          if (event.type === 'status' || event.type === 'progress' || event.type === 'done') {
+            partialVideo = {
+              ...partialVideo,
+              downloadArtifact: mergeDownloadArtifact(partialVideo.downloadArtifact, event.artifact) || event.artifact,
+            };
+            updateActiveBenchmarkDownloadArtifact(newId, event.artifact);
+          }
+        },
+      });
+      partialVideo = {
+        ...partialVideo,
+        downloadArtifact: mergeDownloadArtifact(partialVideo.downloadArtifact, downloadArtifact) || downloadArtifact,
+      };
+      await saveBenchmarkVideo(partialVideo);
+      await loadBenchmarks();
+      clearActiveBenchmarkDownloadArtifact(newId);
+
       const analyzed = await analyzeYouTubeBenchmark(intake);
       const updatedVideo: BenchmarkVideo = {
         ...partialVideo,
         title: analyzed.title,
         status: 'completed',
         deconstructResult: analyzed.shots.length ? analyzed.shots : null,
+        breakdownReport: analyzed.breakdownReport,
         metrics: analyzed.metrics,
         sourceMeta: analyzed.sourceMeta,
         transcriptStatus: analyzed.transcriptStatus,
@@ -142,6 +852,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
         analysisBasis: analyzed.analysisBasis,
         warnings: analyzed.warnings,
         errorMessage: undefined,
+        downloadArtifact: partialVideo.downloadArtifact,
       };
 
       await saveBenchmarkVideo(updatedVideo);
@@ -152,10 +863,19 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '视频解构失败';
+      clearActiveBenchmarkDownloadArtifact(newId);
+      const failedDownloadArtifact = partialVideo.downloadArtifact?.status === 'ready'
+        ? partialVideo.downloadArtifact
+        : {
+            ...(partialVideo.downloadArtifact || { warnings: [] }),
+            status: 'failed' as const,
+            errorMessage: message,
+          };
       await saveBenchmarkVideo({
         ...partialVideo,
         status: 'failed',
         errorMessage: message,
+        downloadArtifact: failedDownloadArtifact,
       });
       await loadBenchmarks();
       showAlert(message, { type: 'error' });
@@ -445,7 +1165,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
 
         <div className="flex-1 min-h-screen lg:ml-72">
           <main className="p-6 md:p-8 xl:p-10">
-            <div className="max-w-7xl mx-auto space-y-8">
+            <div className="w-full max-w-none space-y-8">
               <header className="border-b border-[var(--border-subtle)] pb-6 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
                 <div className="space-y-2">
                   <h2 className="text-3xl font-light text-[var(--text-primary)] tracking-tight flex items-center gap-3">
@@ -807,6 +1527,69 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                 </div>
                               </div>
 
+                              {currentDownloadArtifact && (
+                                <div className="rounded-md border border-[var(--border-primary)] bg-[var(--bg-base)] px-3 py-3 text-xs leading-6 text-[var(--text-tertiary)]">
+                                  <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                                    <div>
+                                      <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">下载制品</div>
+                                      <div className="mt-1 text-[var(--text-primary)]">{downloadStatusLabel}</div>
+                                    </div>
+                                    {currentDownloadArtifact.outputDirectory && (
+                                      <div className="text-[10px] font-mono text-[var(--text-muted)] break-all md:max-w-[60%] md:text-right">
+                                        {currentDownloadArtifact.outputDirectory}
+                                      </div>
+                                    )}
+                                  </div>
+                                  {currentDownloadArtifact.outputDirectory && currentDownloadArtifact.status === 'downloading' && (
+                                    <div className="mt-2 text-[11px] text-[var(--text-muted)]">
+                                      正在写入：<span className="font-mono break-all text-[var(--text-primary)]">{currentDownloadArtifact.outputDirectory}</span>
+                                    </div>
+                                  )}
+                                  {typeof currentDownloadArtifact.progressPercent === 'number' && currentDownloadArtifact.status === 'downloading' && (
+                                    <div className="mt-3 space-y-2">
+                                      <div className="h-2 overflow-hidden rounded-full bg-[var(--bg-hover)]">
+                                        <div
+                                          className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300 ease-out"
+                                          style={{ width: `${Math.max(2, Math.min(100, currentDownloadArtifact.progressPercent))}%` }}
+                                        />
+                                      </div>
+                                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--text-muted)]">
+                                        <span className="text-[var(--text-primary)]">{currentDownloadArtifact.progressPercent.toFixed(currentDownloadArtifact.progressPercent >= 10 ? 0 : 1)}%</span>
+                                        {currentDownloadArtifact.downloadedBytes !== undefined && (
+                                          <span>
+                                            已下载 {formatByteCount(currentDownloadArtifact.downloadedBytes)}
+                                            {currentDownloadArtifact.totalBytes !== undefined ? ` / ${formatByteCount(currentDownloadArtifact.totalBytes)}` : ''}
+                                          </span>
+                                        )}
+                                        {currentDownloadArtifact.speedBytesPerSecond !== undefined && (
+                                          <span>速度 {formatByteCount(currentDownloadArtifact.speedBytesPerSecond)}/s</span>
+                                        )}
+                                        {currentDownloadArtifact.etaSeconds !== undefined && (
+                                          <span>剩余约 {formatEtaLabel(currentDownloadArtifact.etaSeconds)}</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {currentDownloadArtifact.localPath && (
+                                    <div className="mt-2 break-all font-mono text-[10px] text-[var(--text-primary)]">
+                                      {currentDownloadArtifact.localPath}
+                                    </div>
+                                  )}
+                                  {currentDownloadArtifact.errorMessage && (
+                                    <div className="mt-2 text-[var(--error-text)]">
+                                      {currentDownloadArtifact.errorMessage}
+                                    </div>
+                                  )}
+                                  {!!currentDownloadArtifact.warnings?.length && (
+                                    <div className="mt-2 space-y-1 text-[var(--warning)]">
+                                      {currentDownloadArtifact.warnings.map((warning, index) => (
+                                        <div key={`${warning}-${index}`}>{warning}</div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
                               {currentBenchmark.errorMessage && (
                                 <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-hover-bg)] px-3 py-2 text-xs leading-6 text-[var(--error-text)]">
                                   {currentBenchmark.errorMessage}
@@ -834,186 +1617,246 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                             </div>
                           )}
 
-                          {/* Metrics Evaluation Panel */}
-                          {currentBenchmarkId && currentBenchmark?.metrics && (
-                            <div className="mt-8 space-y-6">
-                              <h4 className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2 border-b border-[var(--border-subtle)] pb-2">
-                                <Sparkles className="w-4 h-4 text-[var(--error)]" />
-                                视频爆款因子结构化评估
-                              </h4>
-                              
-                              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                {/* T0 Panel */}
-                                <div className="border border-[var(--error-border)] rounded-lg overflow-hidden bg-[var(--bg-primary)]">
-                                  <div className="bg-[var(--error-hover-bg)] px-4 py-2 border-b border-[var(--error-border)] flex items-center gap-2">
-                                    <span className="text-xs font-bold text-[var(--error-text)] uppercase tracking-wider">T0 决定上限</span>
-                                    <span className="text-[10px] text-[var(--error-text)] opacity-80 uppercase">最重要的核心指标</span>
-                                  </div>
-                                  <div className="p-4 space-y-4 text-xs">
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2">播放量:</span>
-                                      <span className="text-[var(--text-primary)]">{currentBenchmark.metrics.t0_playCount}</span>
-                                    </div>
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 inline-block mb-1">故事脚本:</span>
-                                      <p className="text-[var(--text-tertiary)] leading-relaxed bg-[var(--bg-sunken)] p-2 rounded">{currentBenchmark.metrics.t0_storyScript}</p>
-                                    </div>
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 inline-block mb-1">爆款因子:</span>
-                                      <p className="text-[var(--text-primary)] leading-relaxed">{currentBenchmark.metrics.t0_viralFactors}</p>
-                                    </div>
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2">同质化程度:</span>
-                                      <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t0_homogenization}</span>
-                                    </div>
-                                  </div>
+                          {currentBenchmarkId && currentBenchmark && (
+                            <div className="mt-8 rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] overflow-hidden">
+                              <div className={`flex items-center justify-between gap-3 px-5 py-4 md:px-6 ${isEditingBenchmarkBreakdown || isBenchmarkBreakdownExpanded ? 'border-b border-[var(--border-subtle)]' : ''}`}>
+                                <div>
+                                  <h4 className="text-sm font-bold tracking-wide text-[var(--text-primary)]">视频拆解方案</h4>
+                                  <p className="mt-1 text-[11px] leading-5 text-[var(--text-muted)]">
+                                    展示当前记录生成的长文本报告；旧记录会基于已保存的分析结果做保守回填。
+                                  </p>
                                 </div>
-
-                                {/* T1 Panel */}
-                                <div className="border border-[var(--border-secondary)] rounded-lg overflow-hidden bg-[var(--bg-primary)] h-fit">
-                                  <div className="bg-[var(--overlay-light)] px-4 py-2 border-b border-[var(--border-secondary)] flex items-center gap-2">
-                                    <span className="text-xs font-bold text-[var(--accent-text)] uppercase tracking-wider">T1 硬指标</span>
-                                    <span className="text-[10px] text-[var(--accent-text)] opacity-80 uppercase">影响观看率与时长</span>
+                                {!isEditingBenchmarkBreakdown ? (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setIsBenchmarkBreakdownExpanded((prev) => !prev)}
+                                      aria-label={isBenchmarkBreakdownExpanded ? '收起视频拆解方案' : '展开视频拆解方案'}
+                                      title={isBenchmarkBreakdownExpanded ? '收起' : '展开'}
+                                      className="inline-flex items-center justify-center rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] p-2 text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)]"
+                                    >
+                                      {isBenchmarkBreakdownExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={handleStartEditBenchmarkBreakdown}
+                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                      className="inline-flex items-center gap-2 rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-bold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      编辑
+                                    </button>
                                   </div>
-                                  <div className="p-4 grid grid-cols-2 gap-y-4 gap-x-2 text-[11px]">
-                                    <div className="col-span-2">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2">前三秒内容:</span>
-                                      <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t1_first3sContent}</span>
-                                    </div>
-                                    <div className="col-span-2">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2">前三秒画面:</span>
-                                      <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t1_first3sVisuals}</span>
-                                    </div>
-                                    <div className="col-span-1 border-t border-[var(--border-subtle)] pt-2 md:border-t-0 md:pt-0">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 block mb-1">总时长</span>
-                                      <span className="text-[var(--text-primary)] font-mono">{currentBenchmark.metrics.t1_duration}</span>
-                                    </div>
-                                    <div className="col-span-1 border-t border-[var(--border-subtle)] pt-2 md:border-t-0 md:pt-0">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 block mb-1">分镜个数</span>
-                                      <span className="text-[var(--text-primary)] font-mono">{currentBenchmark.metrics.t1_shotCount}</span>
-                                    </div>
-                                    <div className="col-span-1">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 block mb-1">分镜时长</span>
-                                      <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t1_shotDuration}</span>
-                                    </div>
-                                    <div className="col-span-1">
-                                      <span className="text-[var(--text-secondary)] font-bold mr-2 block mb-1">反转数量</span>
-                                      <span className="text-[var(--text-primary)] font-mono text-[var(--error-text)]">{currentBenchmark.metrics.t1_twistCount}</span>
-                                    </div>
-                                    <div className="col-span-2 flex items-center gap-4 border-t border-[var(--border-subtle)] pt-3 mt-1">
-                                      <div><span className="text-[var(--text-secondary)] font-bold mr-2">形象主体:</span> <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t1_mainSubject}</span></div>
-                                      <div><span className="text-[var(--text-secondary)] font-bold mr-2">节奏快慢:</span> <span className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t1_pacing}</span></div>
-                                    </div>
+                                ) : (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={handleSaveBenchmarkBreakdown}
+                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                      className="inline-flex items-center gap-2 rounded-md bg-[var(--accent)] px-3 py-2 text-[11px] font-bold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {isSavingBenchmarkBreakdown ? '保存中...' : '保存'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={handleCancelEditBenchmarkBreakdown}
+                                      disabled={isSavingBenchmarkBreakdown}
+                                      className="inline-flex items-center gap-2 rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-bold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      取消
+                                    </button>
                                   </div>
-                                </div>
+                                )}
                               </div>
-
-                              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                                {/* T2 Panel */}
-                                <div className="lg:col-span-2 border border-[var(--border-primary)] rounded-lg overflow-hidden bg-[var(--bg-primary)]">
-                                  <div className="bg-[var(--bg-sunken)] px-4 py-2 border-b border-[var(--border-primary)] flex items-center gap-2">
-                                    <span className="text-[11px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">T2 软指标</span>
-                                    <span className="text-[10px] text-[var(--text-muted)] uppercase">锦上添花的细节体验</span>
-                                  </div>
-                                  <div className="p-4 grid grid-cols-2 md:grid-cols-3 gap-4 text-[11px] text-[var(--text-tertiary)]">
-                                    <div className="flex flex-col gap-1 border-b border-[var(--border-subtle)] pb-2"><span className="text-[var(--text-secondary)] font-bold">画风</span><span>{currentBenchmark.metrics.t2_artStyle}</span></div>
-                                    <div className="flex flex-col gap-1 border-b border-[var(--border-subtle)] pb-2"><span className="text-[var(--text-secondary)] font-bold">音乐</span><span>{currentBenchmark.metrics.t2_music}</span></div>
-                                    <div className="flex flex-col gap-1 border-b border-[var(--border-subtle)] pb-2"><span className="text-[var(--text-secondary)] font-bold">音效</span><span>{currentBenchmark.metrics.t2_soundEffects}</span></div>
-                                    <div className="flex flex-col gap-1 border-b border-[var(--border-subtle)] pb-2"><span className="text-[var(--text-secondary)] font-bold">画面亮度/艳度</span><span>{currentBenchmark.metrics.t2_visualBrightness}</span></div>
-                                    <div className="flex flex-col gap-1 border-b border-[var(--border-subtle)] pb-2 md:col-span-2"><span className="text-[var(--text-secondary)] font-bold">表情与肢体生动度</span><span>{currentBenchmark.metrics.t2_expressionLiveliness}</span></div>
-                                    <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">动作幅度</span><span>{currentBenchmark.metrics.t2_motionMagnitude}</span></div>
-                                    <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">转场剪辑处理</span><span>{currentBenchmark.metrics.t2_transitions}</span></div>
-                                    <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">清晰度与画质</span><span>{currentBenchmark.metrics.t2_clarity}</span></div>
-                                    <div className="col-span-2 md:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-[var(--border-subtle)] pt-3 mt-1">
-                                      <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">配音</span><span>{currentBenchmark.metrics.t2_voiceOver}</span></div>
-                                      <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">人群倾向</span><span>{currentBenchmark.metrics.t2_demographics}</span></div>
-                                      <div className="flex flex-col gap-1"><span className="text-[var(--text-secondary)] font-bold">细节与Bug</span><span>{currentBenchmark.metrics.t2_errors}</span></div>
-                                    </div>
-                                  </div>
+                              {(isEditingBenchmarkBreakdown || isBenchmarkBreakdownExpanded) && (
+                                <div className="p-5 md:p-6">
+                                  {isEditingBenchmarkBreakdown ? (
+                                    <textarea
+                                      value={benchmarkBreakdownDraft}
+                                      onChange={(e) => setBenchmarkBreakdownDraft(e.target.value)}
+                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                      className="min-h-[360px] max-h-[720px] w-full resize-y rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                                    />
+                                  ) : (
+                                    <pre className="max-h-[720px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-tertiary)]">
+                                      {benchmarkBreakdownDisplayText}
+                                    </pre>
+                                  )}
                                 </div>
-
-                                {/* T3 Panel */}
-                                <div className="border border-[var(--border-primary)] rounded-lg overflow-hidden bg-[var(--bg-primary)]">
-                                  <div className="bg-[var(--bg-sunken)] px-4 py-2 border-b border-[var(--border-primary)] flex items-center gap-2">
-                                    <span className="text-[11px] font-bold text-[var(--text-secondary)] uppercase tracking-wider">T3 灵活指标</span>
-                                    <span className="text-[10px] text-[var(--text-muted)] uppercase">受赛道经验影响</span>
-                                  </div>
-                                  <div className="p-4 space-y-4 text-[11px]">
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold block mb-1">自己能看下去吗？</span>
-                                      <p className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t3_subjectiveInterest}</p>
-                                    </div>
-                                    <div>
-                                      <span className="text-[var(--text-secondary)] font-bold block mb-1">发布时间</span>
-                                      <p className="text-[var(--text-tertiary)]">{currentBenchmark.metrics.t3_publishTime}</p>
-                                    </div>
-                                    <div className="bg-[var(--bg-sunken)] p-3 rounded border border-[var(--border-subtle)]">
-                                      <span className="text-[var(--text-secondary)] font-bold block mb-1 text-[10px] uppercase font-mono">Custom / 赛道专属</span>
-                                      <p className="text-[var(--accent-text)]">{currentBenchmark.metrics.t3_customMetrics}</p>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
+                              )}
                             </div>
                           )}
 
-                          {/* Deconstruct Results Table */}
-                          {currentBenchmarkId && deconstructResult && (
-                            <div className="mt-6 border border-[var(--border-primary)] rounded-lg overflow-hidden flex flex-col max-h-[500px]">
-                              <div className="bg-[var(--table-header-bg)] border-b border-[var(--border-primary)] px-4 py-3 flex items-center justify-between sticky top-0 z-10">
-                                <span className="text-xs font-bold text-[var(--text-primary)] flex items-center gap-2">
-                                  <Sparkles className="w-3.5 h-3.5 text-[var(--accent-text)]" />
-                                  解构分镜列表
-                                </span>
-                                <span className="text-[10px] text-[var(--text-muted)] font-mono uppercase">
-                                  {deconstructResult.length} 镜头
-                                </span>
+                          {currentBenchmarkId && currentBenchmark && selectedMockSliceShot && (
+                            <div className="mt-6 rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-5 md:p-6 space-y-5">
+                              <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                                <div className="space-y-2 max-w-3xl">
+                                  <div className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                                    <LayoutPanelTop className="w-3.5 h-3.5" />
+                                    Slice Results Preview
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-bold tracking-wide text-[var(--text-primary)]">拆片镜头预览面板</h4>
+                                    <p className="mt-1 text-[11px] leading-6 text-[var(--text-muted)]">
+                                      当前区域使用模拟切片数据，为《{currentBenchmark.title}》预演镜头浏览、三帧对照和后续操作层级，方便先把交互与视觉节奏调顺。
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[420px]">
+                                  {[
+                                    { label: 'Mock 镜头', value: `${MOCK_SLICE_SHOTS.length} 条` },
+                                    { label: '关键帧卡', value: `${MOCK_SLICE_TOTAL_FRAMES} 张` },
+                                    { label: '覆盖时长', value: MOCK_SLICE_TOTAL_COVERAGE_LABEL },
+                                    { label: '当前选择', value: `镜头 ${selectedMockSliceShot.indexLabel}` },
+                                  ].map((item) => (
+                                    <div key={item.label} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
+                                      <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--text-muted)]">{item.label}</div>
+                                      <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{item.value}</div>
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
-                              <div className="overflow-x-auto overflow-y-auto w-full max-h-[500px] bg-[var(--bg-primary)]">
-                                <table className="w-full text-left border-collapse text-sm min-w-[1400px]">
-                                  <thead className="sticky top-0 bg-[var(--bg-sunken)] border-b border-[var(--border-primary)] z-10 shadow-sm">
-                                    <tr>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-16 text-center">镜头</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[120px]">视频片段</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[200px]">视频提示词</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[100px]">时间</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[280px]">原视频分镜设计</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[120px]">视频首帧</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[200px]">视频首帧提示词</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[120px]">视频尾帧</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[200px]">视频尾帧提示词</th>
-                                      <th className="px-4 py-3 font-medium text-[var(--text-muted)] text-[11px] uppercase tracking-wider w-[120px]">调整</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-[var(--border-subtle)]">
-                                    {deconstructResult.map((shot) => (
-                                      <tr key={shot.id} className="hover:bg-[var(--bg-hover)] transition-colors">
-                                        <td className="px-4 py-3 align-top text-center text-[var(--text-tertiary)] font-mono text-xs">{shot.id}</td>
-                                        <td className="px-4 py-3 align-top">
-                                          <div className={`w-20 h-12 flex items-center justify-center border border-[var(--border-subtle)] rounded text-[10px] text-[var(--text-muted)] ${shot.videoClip ? shot.videoClip : 'border-dashed'}`}>
-                                            片段
+
+                              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)] xl:items-start">
+                                <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4">
+                                  <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                    <div>
+                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头矩阵</div>
+                                      <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要精修的段落</div>
+                                    </div>
+                                    <div className="text-[11px] text-[var(--text-tertiary)] xl:max-w-xs">
+                                      所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                                    {MOCK_SLICE_SHOTS.map((shot) => {
+                                      const isActive = shot.id === selectedMockSliceShot.id;
+                                      return (
+                                        <button
+                                          key={shot.id}
+                                          type="button"
+                                          aria-pressed={isActive}
+                                          onClick={() => setSelectedMockSliceShotId(shot.id)}
+                                          className={`group rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]'}`}
+                                        >
+                                          <div className="flex items-center justify-between gap-3">
+                                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${isActive ? 'bg-[var(--accent)]/14 text-[var(--accent)]' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'}`}>
+                                              镜头 {shot.indexLabel}
+                                            </span>
+                                            <span className="text-[10px] font-mono text-[var(--text-muted)]">{shot.durationLabel}</span>
                                           </div>
-                                        </td>
-                                        <td className="px-4 py-3 align-top text-[var(--text-tertiary)] text-xs">{shot.videoPrompt || '-'}</td>
-                                        <td className="px-4 py-3 align-top text-[var(--accent-text)] font-mono text-[11px] whitespace-nowrap">{shot.time}</td>
-                                        <td className="px-4 py-3 align-top text-[var(--text-secondary)] leading-relaxed text-xs">{shot.desc}</td>
-                                        <td className="px-4 py-3 align-top">
-                                          <div className={`w-20 h-12 flex items-center justify-center border border-[var(--border-subtle)] rounded text-[10px] text-[var(--text-muted)] ${shot.firstFrame ? shot.firstFrame : 'border-dashed'}`}>
-                                            首帧
+                                          <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{shot.title}</div>
+                                          <div className="mt-2 text-[11px] leading-5 text-[var(--text-tertiary)]">{shot.beatSummary}</div>
+                                          <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{shot.timeRange}</div>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+
+                                <div className="self-start xl:sticky xl:top-6">
+                                  <div className="space-y-4 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
+                                    <div className="flex flex-col gap-2 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4">
+                                      <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                                        <div>
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">选中镜头详情</div>
+                                          <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedMockSliceShot.indexLabel} · {selectedMockSliceShot.title}</div>
+                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedMockSliceShot.beatSummary}</div>
+                                        </div>
+                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedMockSliceShot.timeRange}</div>
+                                      </div>
+                                      <p className="text-[11px] leading-5 text-[var(--text-muted)]">
+                                        浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和 mock 操作会固定保留在右侧，方便持续对照。
+                                      </p>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                      {selectedMockSliceShot.frames.map((frame) => {
+                                        const toneClasses = getMockSliceFrameToneClasses(frame.tone);
+                                        return (
+                                          <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
+                                            <div className="flex items-center justify-between gap-3">
+                                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${toneClasses.badge}`}>
+                                                {frame.label}
+                                              </span>
+                                              <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
+                                            </div>
+
+                                            <div className="relative h-40 overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[linear-gradient(135deg,var(--bg-hover)_0%,var(--bg-sunken)_100%)] px-4 py-4">
+                                              <div className={`absolute -right-8 top-5 h-24 w-24 rounded-full blur-2xl ${toneClasses.glow}`} />
+                                              <div className="absolute inset-x-4 top-4 flex items-start justify-between">
+                                                <div className="h-10 w-16 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)]/60" />
+                                                <div className="h-7 w-7 rounded-full border border-[var(--border-secondary)] bg-[var(--bg-primary)]/50" />
+                                              </div>
+                                              <div className="absolute inset-x-4 bottom-4 space-y-2">
+                                                <div className={`h-1.5 w-16 rounded-full ${toneClasses.line}`} />
+                                                <div className="h-1.5 w-24 rounded-full bg-[var(--border-secondary)]" />
+                                                <div className="h-1.5 w-20 rounded-full bg-[var(--border-secondary)]/70" />
+                                              </div>
+                                            </div>
+
+                                            <div>
+                                              <div className="text-[11px] font-semibold text-[var(--text-primary)]">{frame.caption}</div>
+                                              <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">用于预览该镜头在首帧 / 中段 / 尾帧上的信息密度和构图落点。</div>
+                                            </div>
                                           </div>
-                                        </td>
-                                        <td className="px-4 py-3 align-top text-[var(--text-tertiary)] text-xs">{shot.firstFramePrompt || '-'}</td>
-                                        <td className="px-4 py-3 align-top">
-                                          <div className={`w-20 h-12 flex items-center justify-center border border-[var(--border-subtle)] rounded text-[10px] text-[var(--text-muted)] ${shot.lastFrame ? shot.lastFrame : 'border-dashed'}`}>
-                                            尾帧
+                                        );
+                                      })}
+                                    </div>
+
+                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头元数据</div>
+                                      <div className="mt-4 space-y-3">
+                                        {[
+                                          { label: '镜头时长', value: selectedMockSliceShot.durationLabel },
+                                          { label: '转场方式', value: selectedMockSliceShot.transition },
+                                          { label: '运镜语言', value: selectedMockSliceShot.cameraLanguage },
+                                          { label: '情绪落点', value: selectedMockSliceShot.emotionAnchor },
+                                          { label: '声音设计', value: selectedMockSliceShot.soundDesign },
+                                          { label: '提示词聚焦', value: selectedMockSliceShot.promptFocus },
+                                        ].map((item) => (
+                                          <div key={item.label} className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                            <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{item.label}</div>
+                                            <div className="mt-1 text-[11px] leading-5 text-[var(--text-primary)]">{item.value}</div>
                                           </div>
-                                        </td>
-                                        <td className="px-4 py-3 align-top text-[var(--text-tertiary)] text-xs">{shot.lastFramePrompt || '-'}</td>
-                                        <td className="px-4 py-3 align-top text-[var(--text-tertiary)] text-xs">{shot.adjustment || '-'}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                        ))}
+                                      </div>
+                                    </div>
+
+                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">Mock 操作</div>
+                                      <div className="mt-4 space-y-3">
+                                        <button
+                                          type="button"
+                                          disabled
+                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-3 text-[11px] font-bold text-[var(--accent-text)] opacity-60"
+                                        >
+                                          <Wand2 className="w-3.5 h-3.5" />
+                                          生成镜头批注
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled
+                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
+                                        >
+                                          <Archive className="w-3.5 h-3.5" />
+                                          导出三帧卡片
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled
+                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
+                                        >
+                                          <ExternalLink className="w-3.5 h-3.5" />
+                                          同步到导演台
+                                        </button>
+                                      </div>
+                                      <p className="mt-4 text-[11px] leading-5 text-[var(--text-muted)]">
+                                        这一组按钮目前仅用于确认右侧检视器中的信息层级与视觉反馈，后续接入真实切片结果时可直接复用当前布局。
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
                               </div>
                             </div>
                           )}

@@ -66,6 +66,17 @@ export {
   type VisualStyleInferenceResult,
 } from './scriptService';
 
+// 剧本预解析服务
+export {
+  preparseScriptInput,
+  SCRIPT_PREPARSE_VERSION,
+  type ScriptPreparseDetectedStructure,
+  type ScriptPreparseMode,
+  type ScriptPreparseResult,
+  type ScriptPreparseWarning,
+  type ScriptPreparseWarningCode,
+} from './scriptPreparseService';
+
 // 视觉资产生成服务
 export {
   generateArtDirection,

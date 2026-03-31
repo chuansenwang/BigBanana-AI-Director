@@ -1,0 +1,60 @@
+{
+  "skill_name": "storyboard-timecode-slicing",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "请用本地视频 `fixtures/source.mp4` 和时间码表 `fixtures/shots.csv` 批量切出分镜片段，并导出每段首帧、中间参考帧、尾帧和 manifest。输出目录放到 `artifacts/run-1`。",
+      "expected_output": "生成 clips、frames 和 manifest.json；所有 3 个镜头状态为 ok，并带 middle frame。",
+      "files": [],
+      "expectations": [
+        "生成 3 个视频片段",
+        "每个镜头都生成首帧、中间帧和尾帧图片",
+        "manifest.json 的 run-level status 为 ok"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "我没有 CSV，只有 Markdown 分镜表 `fixtures/shots.md`。请按表里的镜头号和时间码切视频，并输出每段首帧、中间帧、尾帧。",
+      "expected_output": "Markdown 表格可被正常解析并生成对应输出。",
+      "files": [],
+      "expectations": [
+        "Markdown 表格被正确解析",
+        "生成 3 个视频片段",
+        "manifest.json 的 sheet_format 为 markdown"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "请处理 `fixtures/mixed-shots.csv`。其中有一行时间码故意写错，我希望其余有效镜头仍然继续输出，并在 manifest 里明确标记失败行。",
+      "expected_output": "run status 为 partial；有效行产出 clips/frames，错误行带 error_code/error_message。",
+      "files": [],
+      "expectations": [
+        "有效镜头继续生成输出",
+        "manifest.json 的 run-level status 为 partial",
+        "错误行包含 error_code 和 error_message"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "请在开启 scenedetect 增强的情况下处理 `fixtures/shots.csv`。如果当前环境没有安装 scenedetect，也不要失败，继续输出 clips 和首中尾帧，并在 manifest 里记录降级原因。",
+      "expected_output": "主输出成功；若 scenedetect 不可用，则 manifest 记录 unavailable 警告而不是整批失败。",
+      "files": [],
+      "expectations": [
+        "主裁剪输出仍然成功",
+        "manifest warnings 记录 scenedetect 降级信息",
+        "required artifacts 不受 scenedetect 缺失影响"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "请把 `fixtures/shots.csv` 的每个镜头导出为首帧、2 张中间帧和尾帧，也就是运行时等价于 `--middle-frames 2`。",
+      "expected_output": "主输出成功，并且每个镜头在 manifest 中包含 `middle_frame_paths` 列表。",
+      "files": [],
+      "expectations": [
+        "每个镜头输出两张中间帧",
+        "middle_frame_paths 按时间顺序记录所有中间帧",
+        "middle_frame_path 仍指向代表性的中间帧"
+      ]
+    }
+  ]
+}

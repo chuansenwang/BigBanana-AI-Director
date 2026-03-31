@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0.0",
+  "status": "ok",
+  "warnings": [],
+  "inputs": {
+    "video_path": "C:\\work\\source.mp4",
+    "sheet_path": "C:\\work\\shots.csv",
+    "sheet_format": "csv",
+    "source_duration_seconds": 125.432
+  },
+  "output_dir": "C:\\work\\storyboard-output",
+  "clip_mode": "accurate",
+  "summary": {
+    "total_rows": 3,
+    "ok_rows": 3,
+    "partial_rows": 0,
+    "failed_rows": 0
+  },
+  "shots": [
+    {
+      "row_index": 1,
+      "shot_number": "001",
+      "start_time": "00:00:03.500",
+      "end_time": "00:00:08.920",
+      "base_name": "S001_00-00-03-500_00-00-08-920",
+      "status": "ok",
+      "clip_path": "C:\\work\\storyboard-output\\clips\\S001_00-00-03-500_00-00-08-920.mp4",
+      "first_frame_path": "C:\\work\\storyboard-output\\frames\\S001_00-00-03-500_00-00-08-920_first.png",
+      "middle_frame_path": "C:\\work\\storyboard-output\\frames\\S001_00-00-03-500_00-00-08-920_middle.png",
+      "middle_frame_paths": [
+        "C:\\work\\storyboard-output\\frames\\S001_00-00-03-500_00-00-08-920_middle.png"
+      ],
+      "last_frame_path": "C:\\work\\storyboard-output\\frames\\S001_00-00-03-500_00-00-08-920_last.png",
+      "duration_seconds": 5.42,
+      "warnings": [],
+      "error_code": null,
+      "error_message": null,
+      "enrichment": {
+        "scenedetect": {
+          "enabled": true,
+          "available": true,
+          "status": "ok",
+          "detector": "content",
+          "threshold": 27.0,
+          "min_scene_len": 15,
+          "scene_count": 1,
+          "scenes": [
+            {
+              "index": 1,
+              "start_timecode": "00:00:00.000",
+              "end_timecode": "00:00:05.420",
+              "start_seconds": 0.0,
+              "end_seconds": 5.42,
+              "duration_seconds": 5.42,
+              "representative_frame_path": "C:\\work\\storyboard-output\\frames\\S001_00-00-03-500_00-00-08-920_scene01_middle.png"
+            }
+          ]
+        },
+        "turning_points": {
+          "enabled": true,
+          "available": true,
+          "status": "ok",
+          "method": "ffmpeg_scene_score",
+          "threshold": 0.1,
+          "min_gap_seconds": 0.2,
+          "max_points": 6,
+          "point_count": 2,
+          "points": [
+            {
+              "index": 1,
+              "timestamp_seconds": 1.25,
+              "scene_score": 0.52,
+              "frame_path": "C:\\work\\storyboard-output\\keyframes\\S001_00-00-03-500_00-00-08-920_turning01_t1-250.png"
+            },
+            {
+              "index": 2,
+              "timestamp_seconds": 4.1,
+              "scene_score": 0.44,
+              "frame_path": "C:\\work\\storyboard-output\\keyframes\\S001_00-00-03-500_00-00-08-920_turning02_t4-100.png"
+            }
+          ]
+        }
+      },
+      "source_row": {
+        "shot_number": "001",
+        "start_time": "00:00:03.500",
+        "end_time": "00:00:08.920",
+        "title": "opening-shot",
+        "notes": "slow push in"
+      }
+    }
+  ]
+}

@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X, Cpu } from 'lucide-react';
+import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X, Cpu, HardDrive } from 'lucide-react';
 import { ModelProvider, ProviderAuthHeaderType, ProviderAuthMode, ProviderConnectionMode, ProviderProtocol } from '../../types/model';
 import { getGlobalApiKey, setGlobalApiKey, getProviders, addProvider, updateProvider } from '../../services/modelRegistry';
 import { verifyApiKey } from '../../services/modelService';
@@ -13,7 +13,13 @@ import { CUSTOM_PROVIDER_PROTOCOLS } from '../../services/modelProtocolService';
 import { validateProviderDraft } from '../../services/modelValidationService';
 import { useAlert } from '../GlobalAlert';
 import { testProviderConnection } from '../../services/providerConnectionTestService';
-import { LocalAnalysisHealthData, LocalAnalysisUserConfig } from '../../types';
+import { ArtifactStorageUserConfig, LocalAnalysisHealthData, LocalAnalysisUserConfig } from '../../types';
+import {
+  clearArtifactStorageUserConfig,
+  loadArtifactStorageUserConfig,
+  normalizeArtifactStorageUserConfig,
+  saveArtifactStorageUserConfig,
+} from '../../services/artifactStorageConfigService';
 import { loadLocalAnalysisUserConfig, saveLocalAnalysisUserConfig } from '../../services/localAnalysisConfigService';
 import { fetchLocalAnalysisHealth } from '../../services/localAnalysisService';
 
@@ -36,6 +42,8 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
   const [providerTestStatus, setProviderTestStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [localAnalysisConfig, setLocalAnalysisConfig] = useState<LocalAnalysisUserConfig>(() => loadLocalAnalysisUserConfig());
   const [localAnalysisMessage, setLocalAnalysisMessage] = useState('');
+  const [artifactStorageConfig, setArtifactStorageConfig] = useState<ArtifactStorageUserConfig>(() => loadArtifactStorageUserConfig());
+  const [artifactStorageMessage, setArtifactStorageMessage] = useState('');
   const [localAnalysisHealth, setLocalAnalysisHealth] = useState<LocalAnalysisHealthData | null>(null);
   const [localAnalysisHealthError, setLocalAnalysisHealthError] = useState('');
   const [isCheckingLocalAnalysisHealth, setIsCheckingLocalAnalysisHealth] = useState(false);
@@ -45,6 +53,7 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     setApiKey(currentKey);
     setProviders(getProviders());
     setLocalAnalysisConfig(loadLocalAnalysisUserConfig());
+    setArtifactStorageConfig(loadArtifactStorageUserConfig());
     if (currentKey) {
       setVerifyStatus('success');
       setVerifyMessage('API Key 已配置');
@@ -81,6 +90,29 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     } finally {
       setIsCheckingLocalAnalysisHealth(false);
     }
+  };
+
+  const updateArtifactStorageField = <K extends keyof ArtifactStorageUserConfig>(
+    field: K,
+    value: ArtifactStorageUserConfig[K],
+  ) => {
+    setArtifactStorageConfig((prev) => ({ ...prev, [field]: value }));
+    setArtifactStorageMessage('');
+  };
+
+  const handleSaveArtifactStorageConfig = () => {
+    const saved = saveArtifactStorageUserConfig(artifactStorageConfig);
+    setArtifactStorageConfig(saved);
+    setArtifactStorageMessage('制品存储配置已保存。后续下载与切片流程会复用这组目录规则。');
+    onRefresh();
+  };
+
+  const handleResetArtifactStorageConfig = () => {
+    clearArtifactStorageUserConfig();
+    const defaults = loadArtifactStorageUserConfig();
+    setArtifactStorageConfig(defaults);
+    setArtifactStorageMessage('已恢复默认制品存储配置。后续下载与切片流程会重新使用默认目录规则。');
+    onRefresh();
   };
 
   const handleVerifyAndSave = async () => {
@@ -236,6 +268,29 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     cancelProviderEdit();
     reloadProviders();
   };
+
+  const normalizedArtifactStorageConfig = normalizeArtifactStorageUserConfig(artifactStorageConfig);
+  const buildArtifactPreviewPath = (
+    folderType: 'downloadsFolder' | 'slicesFolder',
+  ): string => {
+    const parts = [
+      normalizedArtifactStorageConfig.rootFolder,
+      normalizedArtifactStorageConfig[folderType],
+    ];
+
+    if (normalizedArtifactStorageConfig.groupByProject) {
+      parts.push('<project>');
+    }
+
+    if (normalizedArtifactStorageConfig.groupByEpisode) {
+      parts.push('<episode>');
+    }
+
+    return `${parts.join('/')}/`;
+  };
+
+  const artifactDownloadsPreview = buildArtifactPreviewPath('downloadsFolder');
+  const artifactSlicesPreview = buildArtifactPreviewPath('slicesFolder');
 
   return (
     <div className="space-y-6">
@@ -459,6 +514,115 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)]/40 p-5">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--accent-bg)] border border-[var(--accent-border)]">
+            <HardDrive className="w-5 h-5 text-[var(--accent-text)]" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-bold text-[var(--text-primary)]">制品存储</h3>
+            <p className="mt-2 text-xs leading-6 text-[var(--text-tertiary)]">
+              这里定义下载视频与切片制品的默认目录拼接规则，作用于整台设备，不绑定单独项目。根目录支持相对路径，也支持 Windows 绝对路径。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">根目录 <span className="font-mono normal-case tracking-normal text-[var(--text-muted)]">root</span></span>
+              <input
+                type="text"
+                value={artifactStorageConfig.rootFolder}
+                onChange={(e) => updateArtifactStorageField('rootFolder', e.target.value)}
+                placeholder="例如 artifacts 或 D:\soft\video-downloader"
+                className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+              />
+            </label>
+
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">下载目录 <span className="font-mono normal-case tracking-normal text-[var(--text-muted)]">downloads</span></span>
+            <input
+              type="text"
+              value={artifactStorageConfig.downloadsFolder}
+              onChange={(e) => updateArtifactStorageField('downloadsFolder', e.target.value)}
+              placeholder="例如 downloads"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">切片目录 <span className="font-mono normal-case tracking-normal text-[var(--text-muted)]">slices</span></span>
+            <input
+              type="text"
+              value={artifactStorageConfig.slicesFolder}
+              onChange={(e) => updateArtifactStorageField('slicesFolder', e.target.value)}
+              placeholder="例如 slices"
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all font-mono placeholder:text-[var(--text-muted)]"
+            />
+          </label>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <label className="flex items-start gap-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] px-4 py-3 text-xs text-[var(--text-tertiary)]">
+            <input
+              type="checkbox"
+              checked={artifactStorageConfig.groupByProject}
+              onChange={(e) => updateArtifactStorageField('groupByProject', e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-[var(--border-secondary)] bg-[var(--bg-surface)] text-[var(--accent)] focus:ring-[var(--accent-hover)]"
+            />
+            <span className="leading-6">
+              <span className="block font-bold text-[var(--text-primary)]">按项目分组</span>
+              在路径中自动追加 <span className="font-mono text-[var(--text-muted)]">&lt;project&gt;</span> 目录。
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] px-4 py-3 text-xs text-[var(--text-tertiary)]">
+            <input
+              type="checkbox"
+              checked={artifactStorageConfig.groupByEpisode}
+              onChange={(e) => updateArtifactStorageField('groupByEpisode', e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-[var(--border-secondary)] bg-[var(--bg-surface)] text-[var(--accent)] focus:ring-[var(--accent-hover)]"
+            />
+            <span className="leading-6">
+              <span className="block font-bold text-[var(--text-primary)]">按分集分组</span>
+              在路径中自动追加 <span className="font-mono text-[var(--text-muted)]">&lt;episode&gt;</span> 目录。
+            </span>
+          </label>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">下载路径预览</div>
+            <div className="mt-2 text-sm font-mono text-[var(--text-primary)] break-all">{artifactDownloadsPreview}</div>
+          </div>
+          <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">切片路径预览</div>
+            <div className="mt-2 text-sm font-mono text-[var(--text-primary)] break-all">{artifactSlicesPreview}</div>
+          </div>
+        </div>
+
+        <p className="mt-4 text-[10px] leading-6 text-[var(--text-muted)]">
+          这里只保存配置，不会立即创建文件夹。根目录可以填写相对路径或 Windows 绝对路径；下载目录与切片目录仍应保持相对目录名。后续的视频下载与切片流程会读取这里的目录规则并统一落盘。
+        </p>
+
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={handleResetArtifactStorageConfig}
+            className="flex-1 py-3 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] text-xs font-bold uppercase tracking-wider transition-colors rounded-lg border border-[var(--border-primary)]"
+          >
+            恢复默认目录
+          </button>
+          <button
+            onClick={handleSaveArtifactStorageConfig}
+            className="flex-1 py-3 bg-[var(--accent)] text-[var(--text-primary)] font-bold text-xs uppercase tracking-wider rounded-lg hover:bg-[var(--accent-hover)] transition-colors"
+          >
+            保存制品存储配置
+          </button>
+        </div>
+
+        {artifactStorageMessage && <div className="mt-3 text-[10px] text-[var(--success-text)]">{artifactStorageMessage}</div>}
       </div>
 
       <div>

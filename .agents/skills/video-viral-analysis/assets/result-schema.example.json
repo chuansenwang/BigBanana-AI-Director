@@ -1,0 +1,66 @@
+{
+  "schema_version": "v1",
+  "allowed_status_values": ["ok", "partial", "failed"],
+  "status": "partial",
+  "warnings": [
+    "字幕不可用，以下部分判断基于元数据和视觉抽样。"
+  ],
+  "inputs_used": {
+    "video_path": "C:/videos/sample.mp4",
+    "metadata_json_path": null,
+    "source_url": "https://example.com/video",
+    "transcript": false
+  },
+  "confidence": {
+    "level": "medium",
+    "basis": "metadata+visual"
+  },
+  "source": {
+    "platform": "YouTube",
+    "title": "Sample short",
+    "channel": "Sample channel",
+    "duration_seconds": 42
+  },
+  "t0_t1_t2_t3": {
+    "t0": {
+      "summary": "核心题材具备圈层吸引力，但 novelty 证据一般。",
+      "confidence": "medium"
+    },
+    "t1": {
+      "summary": "前三秒钩子明确，节奏偏快。",
+      "confidence": "medium"
+    },
+    "t2": {
+      "summary": "画面可读性较好，但音频维度证据不足。",
+      "confidence": "low"
+    },
+    "t3": {
+      "summary": "适合作为短视频对标样本，不适合做发布时间结论。",
+      "confidence": "low"
+    }
+  },
+  "story_breakdown": {
+    "opening_hook": "前 3 秒直接抛出核心冲突/看点。",
+    "beats": [
+      {
+        "timestamp": "00:00-00:05",
+        "note": "建立主看点"
+      }
+    ],
+    "cta_or_resolution": "结尾无明确 CTA。"
+  },
+  "segments": [
+    {
+      "timestamp": "00:00-00:05",
+      "label": "hook",
+      "summary": "开头快速建立题材兴趣"
+    }
+  ],
+  "transcript_info": {
+    "status": "missing",
+    "language": null
+  },
+  "raw_limits": {
+    "fallback_reason": "transcript_missing"
+  }
+}
