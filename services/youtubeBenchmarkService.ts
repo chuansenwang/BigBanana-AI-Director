@@ -1,4 +1,6 @@
 import {
+  ArtifactStorageUserConfig,
+  BenchmarkDownloadArtifact,
   BenchmarkAnalysisMode,
   BenchmarkFallbackReason,
   BenchmarkMetrics,
@@ -44,6 +46,7 @@ interface IntakeEnvelope {
 
 interface LlmBenchmarkResult {
   title?: string;
+  breakdownReport?: string;
   metrics?: Partial<BenchmarkMetrics>;
   shots?: Array<Partial<BenchmarkShotResult>>;
   warnings?: string[];
@@ -51,6 +54,7 @@ interface LlmBenchmarkResult {
 
 export interface BenchmarkDeconstructionResult {
   title: string;
+  breakdownReport: string;
   metrics: BenchmarkMetrics;
   shots: BenchmarkShotResult[];
   sourceMeta: BenchmarkSourceMeta;
@@ -59,6 +63,27 @@ export interface BenchmarkDeconstructionResult {
   fallbackReason?: BenchmarkFallbackReason;
   analysisBasis: string;
   warnings: string[];
+}
+
+export interface YouTubeBenchmarkDownloadRequest {
+  url: string;
+  videoId: string;
+  artifactStorageConfig: ArtifactStorageUserConfig;
+}
+
+interface BenchmarkDownloadStreamEventBase {
+  seq: number;
+  at: number;
+}
+
+export type BenchmarkDownloadStreamEvent =
+  | (BenchmarkDownloadStreamEventBase & { type: 'status'; artifact: BenchmarkDownloadArtifact })
+  | (BenchmarkDownloadStreamEventBase & { type: 'progress'; artifact: BenchmarkDownloadArtifact })
+  | (BenchmarkDownloadStreamEventBase & { type: 'done'; artifact: BenchmarkDownloadArtifact })
+  | (BenchmarkDownloadStreamEventBase & { type: 'error'; message: string; artifact?: BenchmarkDownloadArtifact });
+
+interface DownloadYouTubeBenchmarkVideoOptions {
+  onEvent?: (event: BenchmarkDownloadStreamEvent) => void;
 }
 
 const buildIntakeUrl = (sourceUrl: string): string => {
@@ -297,6 +322,105 @@ const normalizeShots = (intake: YouTubeBenchmarkIntake, shots: Array<Partial<Ben
     .filter((shot) => Boolean(shot.desc));
 };
 
+const buildTranscriptHighlights = (segments: YouTubeTranscriptSegment[], maxCount: number): string[] => {
+  return segments
+    .slice(0, maxCount)
+    .map((segment) => `${segment.startTimeText} ${clipText(segment.text, 80)}`)
+    .filter(Boolean);
+};
+
+const buildShotTableRows = (shots: BenchmarkShotResult[], transcriptSegments: YouTubeTranscriptSegment[]): string[] => {
+  const sourceShots = shots.length > 0
+    ? shots.slice(0, 12).map((shot, index) => ({
+        id: shot.id,
+        time: shot.time || `镜头 ${index + 1}`,
+        scene: '无法仅凭当前数据确认',
+        shotSize: '无法仅凭当前数据确认',
+        camera: '无法仅凭当前数据确认',
+        content: clipText(shot.desc || '无法仅凭当前数据确认', 120),
+        dialogue: clipText(transcriptSegments[index]?.text || '无法仅凭当前数据确认', 60),
+        sound: transcriptSegments[index]?.text ? '存在字幕/口播文本，具体 SFX/BGM 无法仅凭当前数据确认' : '无法仅凭当前数据确认',
+        effects: '无法仅凭当前数据确认',
+      }))
+    : transcriptSegments.slice(0, 12).map((segment, index) => ({
+        id: index + 1,
+        time: formatRange(segment.startMs, segment.endMs),
+        scene: '无法仅凭当前数据确认',
+        shotSize: '无法仅凭当前数据确认',
+        camera: '无法仅凭当前数据确认',
+        content: clipText(segment.text || '无法仅凭当前数据确认', 120),
+        dialogue: clipText(segment.text || '无法仅凭当前数据确认', 60),
+        sound: '存在字幕/口播文本，具体 SFX/BGM 无法仅凭当前数据确认',
+        effects: '无法仅凭当前数据确认',
+      }));
+
+  if (sourceShots.length === 0) {
+    return [
+      '| 1 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 当前仅有标题/描述/元数据，暂无逐切画面依据 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 |',
+    ];
+  }
+
+  return sourceShots.map((shot) => `| ${shot.id} | ${shot.time} | ${shot.scene} | ${shot.shotSize} | ${shot.camera} | ${shot.content} | ${shot.dialogue} | ${shot.sound} | ${shot.effects} |`);
+};
+
+const buildFallbackBreakdownReport = (
+  intake: YouTubeBenchmarkIntake,
+  metrics: BenchmarkMetrics,
+  shots: BenchmarkShotResult[],
+  analysisBasis: string,
+  warnings: string[]
+): string => {
+  const transcriptHighlights = buildTranscriptHighlights(intake.transcriptSegments, 6);
+  const sceneSummary = shots.length > 0
+    ? shots.slice(0, 5).map((shot, index) => `${index + 1}. ${clipText(shot.desc, 70)}`).join('\n')
+    : transcriptHighlights.length > 0
+      ? transcriptHighlights.map((item, index) => `${index + 1}. ${item}`).join('\n')
+      : `1. 标题主题：${clipText(intake.title, 80)}\n2. 描述补充：${clipText(intake.description || '无法仅凭当前数据确认', 100)}`;
+  const transcriptSection = transcriptHighlights.length > 0
+    ? transcriptHighlights.map((item, index) => `${index === 0 ? '第一' : index === 1 ? '第二' : index === 2 ? '第三' : `第${index + 1}`}部分：基于可用字幕与元数据可确认的段落 (${item.split(' ')[0] || '时间点待确认'} - 无法仅凭当前数据确认) -> ${item}`).join('\n')
+    : '第一部分：当前无可用字幕时间轴 (时间点待确认 - 时间点待确认) -> 只能确认标题、描述与公开元数据，无法稳定拆解全部主要段落。';
+  const warningSection = warnings.length > 0
+    ? warnings.map((warning) => `- ${warning}`).join('\n')
+    : '- 当前无额外系统警告。';
+  const shotRows = buildShotTableRows(shots, intake.transcriptSegments).join('\n');
+
+  return [
+    '请根据我提供的视频内容，参考以下格式输出标准的【视频拆解方案】：',
+    '# 📌 全局设计',
+    `故事线设计： [明线剧情梳理] ${clipText(metrics.t1_mainSubject || '无法仅凭当前数据确认', 140)} + [暗线情绪/反转/互动逻辑梳理] ${clipText(metrics.t0_viralFactors || '无法仅凭当前数据确认', 140)}`,
+    `核心场景 (Scenes)：\n${sceneSummary}`,
+    `核心道具与特效 (Props & VFX)：${clipText(`${metrics.t2_soundEffects || '无法仅凭当前数据确认'}；${metrics.t2_transitions || '无法仅凭当前数据确认'}；${metrics.t2_errors || '无法仅凭当前数据确认'}`, 240)}`,
+    '人物形象与复刻指南 (Characters)：无法仅凭当前数据确认具体人物外观；如需复刻，请仅基于已知标题、描述、字幕中出现的人物身份词补全。[Gender], [Hairstyle], [Clothing], character sheet, full body, three orthographic views: front view, side view, back view, standing pose, consistent character design, centered, split view, white space between views, pure white background, high resolution, concept art style, label "xxxx" in top left, text not overlapping with character.',
+    '# 📖 视频故事情节结构',
+    transcriptSection,
+    '# 🎞️ 详细分镜时间脚本 (请使用Markdown表格输出)',
+    '| 镜头号 | 时间段 | 场景(Scene) | 景别(Shot) | 运镜(Camera) | 画面内容 & 表演指令 | 角色台词 | 声音设计(SFX/BGM) | 道具/特效/后期 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    shotRows,
+    '# 💡 导演/制片复刻执行笔记',
+    `- 机位布置：优先依据可验证的字幕切分或镜头描述建立 shot list；当前镜头数量参考 ${shots.length > 0 ? `${shots.length} 条结构化镜头` : '字幕/元数据粗拆结果'}。`,
+    `- 后期剪辑重点：围绕 ${clipText(metrics.t1_pacing || '无法仅凭当前数据确认', 120)} 保持节奏，优先保留标题与前几秒钩子信息。`,
+    '- 现场执行难点：公开视频缺少完整画面与声音轨道证据时，不要擅自补全景别、运镜、特效细节，应先回看原片逐切确认。',
+    `- 分析依据：${analysisBasis}`,
+    `- 风险/警告：\n${warningSection}`,
+    '# 重点 按照**“逐切记录”**的超精细颗粒度',
+    '在专业的拉片分镜本中，应该做到**“逢切必记”**（即画面只要发生切换，哪怕只有0.5秒，也要单独列为一个镜头号）。当前结果仅基于可用标题、描述、元数据与字幕时间轴做保守拆解；若原片存在更多切点但输入未提供证据，请在复刻前逐切补录。',
+  ].join('\n\n').trim();
+};
+
+const normalizeBreakdownReport = (
+  intake: YouTubeBenchmarkIntake,
+  report: string | undefined,
+  metrics: BenchmarkMetrics,
+  shots: BenchmarkShotResult[],
+  analysisBasis: string,
+  warnings: string[]
+): string => {
+  const trimmed = String(report || '').trim();
+  if (trimmed) return trimmed;
+  return buildFallbackBreakdownReport(intake, metrics, shots, analysisBasis, warnings);
+};
+
 const buildPrompt = (intake: YouTubeBenchmarkIntake): string => {
   const transcriptPayload = intake.transcriptSegments.slice(0, 48).map((segment) => ({
     startMs: segment.startMs,
@@ -315,11 +439,29 @@ const buildPrompt = (intake: YouTubeBenchmarkIntake): string => {
     '4. shots 最多 20 条，按时间顺序输出。',
     '5. 每条 shot 仅输出这些字段：id, time, desc, videoPrompt, firstFramePrompt, lastFramePrompt, adjustment。',
     '6. metrics 中所有字段都必须存在，且值必须是字符串。',
-    '7. 不要输出 markdown，不要输出解释。',
+    '7. breakdownReport 必须存在，且为字符串；内容必须尽量贴合我提供的拆解方案模板，但只能引用输入里可验证的信息。',
+    '8. 不要输出 JSON 之外的 markdown 或解释；如果需要 markdown，只能放在 breakdownReport 字符串内部。',
+    '9. 请尽量贴近以下模板原文与顺序输出 breakdownReport：',
+    '请根据我提供的视频内容，参考以下格式输出标准的【视频拆解方案】：',
+    '# 📌 全局设计',
+    '故事线设计： [明线剧情梳理] +[暗线情绪/反转/互动逻辑梳理]',
+    '核心场景 (Scenes)：[列出视频中的主要场景，及复刻该场景需要的核心背景元素]',
+    '核心道具与特效 (Props & VFX)：[列出关键的实体道具、后期特效、音效及包装设计]',
+    '人物形象与复刻指南 (Characters)：[Gender], [Hairstyle], [Clothing], character sheet, full body, three orthographic views: front view, side view, back view, standing pose, consistent character design, centered, split view, white space between views, pure white background, high resolution, concept art style, label "xxxx" in top left, text not overlapping with character.',
+    '# 📖 视频故事情节结构',
+    '第一部分：[段落主题] (时间点 - 时间点) -> 描述具体情节及在剧本结构中的作用。',
+    '(以此类推，拆解视频的所有主要段落)',
+    '# 🎞️ 详细分镜时间脚本 (请使用Markdown表格输出)',
+    '| 镜头号 | 时间段 | 场景(Scene) | 景别(Shot) | 运镜(Camera) | 画面内容 & 表演指令 | 角色台词 | 声音设计(SFX/BGM) | 道具/特效/后期 |',
+    '# 💡 导演/制片复刻执行笔记',
+    '给出关于【机位布置】、【后期剪辑重点】、【现场执行难点】等维度的专业实操建议。',
+    '# 重点 按照**“逐切记录”**的超精细颗粒度',
+    '在专业的拉片分镜本中，应该做到**“逢切必记”**（即画面只要发生切换，哪怕只有0.5秒，也要单独列为一个镜头号）。',
     '',
     '输出 JSON 结构：',
     JSON.stringify({
       title: intake.title,
+      breakdownReport: '请根据我提供的视频内容，参考以下格式输出标准的【视频拆解方案】：\n# 📌 全局设计\n故事线设计：...\n核心场景 (Scenes)：...\n核心道具与特效 (Props & VFX)：...\n人物形象与复刻指南 (Characters)：...\n# 📖 视频故事情节结构\n第一部分：...\n# 🎞️ 详细分镜时间脚本 (请使用Markdown表格输出)\n| 镜头号 | 时间段 | 场景(Scene) | 景别(Shot) | 运镜(Camera) | 画面内容 & 表演指令 | 角色台词 | 声音设计(SFX/BGM) | 道具/特效/后期 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | 00:00-00:03 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 基于输入数据可验证的描述 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 | 无法仅凭当前数据确认 |\n# 💡 导演/制片复刻执行笔记\n...\n# 重点 按照**“逐切记录”**的超精细颗粒度\n...',
       warnings: ['string'],
       metrics: buildFallbackMetrics(intake),
       shots: [
@@ -381,6 +523,82 @@ export const buildBenchmarkSourceMeta = (intake: YouTubeBenchmarkIntake): Benchm
   transcriptLanguage: intake.transcriptLanguage,
 });
 
+export const downloadYouTubeBenchmarkVideo = async (
+  request: YouTubeBenchmarkDownloadRequest,
+  options: DownloadYouTubeBenchmarkVideoOptions = {},
+): Promise<BenchmarkDownloadArtifact> => {
+  const response = await fetch('/api/youtube-benchmark/download', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok || !response.body) {
+    let message = `视频下载失败（HTTP ${response.status}）`;
+    try {
+      const payload = await response.json() as { error?: string };
+      if (payload?.error) message = payload.error;
+    } catch {
+      // ignore parse error and keep fallback message
+    }
+    throw new Error(message);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalArtifact: BenchmarkDownloadArtifact | null = null;
+
+  const handleChunk = (chunkText: string) => {
+    buffer += chunkText;
+    const blocks = buffer.split(/\n\n/);
+    buffer = blocks.pop() || '';
+
+    for (const block of blocks) {
+      const data = block
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+
+      if (!data) continue;
+      const event = JSON.parse(data) as BenchmarkDownloadStreamEvent;
+      options.onEvent?.(event);
+
+      if (event.type === 'done') {
+        finalArtifact = {
+          ...event.artifact,
+          warnings: event.artifact.warnings || [],
+        };
+      }
+
+      if (event.type === 'error') {
+        throw new Error(event.message || '视频下载失败。');
+      }
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    handleChunk(decoder.decode(value, { stream: true }));
+  }
+
+  const trailing = decoder.decode();
+  if (trailing) {
+    handleChunk(trailing);
+  }
+
+  if (!finalArtifact) {
+    throw new Error('视频下载流已结束，但未返回完成结果。');
+  }
+
+  return finalArtifact;
+};
+
 export const analyzeYouTubeBenchmark = async (
   intake: YouTubeBenchmarkIntake
 ): Promise<BenchmarkDeconstructionResult> => {
@@ -390,19 +608,23 @@ export const analyzeYouTubeBenchmark = async (
   const hasTranscript = intake.transcriptSegments.length > 0;
 
   if (!intake.transcriptSegments.length && !intake.description.trim()) {
+    const warnings = dedupeWarnings([
+      ...baseWarnings,
+      '当前视频没有可用字幕或描述，已退回为元数据层分析。',
+    ]);
+    const metrics = buildFallbackMetrics(intake);
+
     return {
       title: intake.title,
-      metrics: buildFallbackMetrics(intake),
+      breakdownReport: normalizeBreakdownReport(intake, '', metrics, [], analysisBasis, warnings),
+      metrics,
       shots: [],
       sourceMeta,
       transcriptStatus: intake.transcriptStatus,
       analysisMode: 'metadata',
       fallbackReason: 'no_transcript',
       analysisBasis,
-      warnings: dedupeWarnings([
-        ...baseWarnings,
-        '当前视频没有可用字幕或描述，已退回为元数据层分析。',
-      ]),
+      warnings,
     };
   }
 
@@ -410,17 +632,20 @@ export const analyzeYouTubeBenchmark = async (
     const raw = await chatCompletion(buildPrompt(intake), undefined, 0.3, 4096, 'json_object', 300000);
     const parsed = parseJsonWithRecovery<LlmBenchmarkResult>(raw, {});
     const shots = normalizeShots(intake, parsed.shots);
+    const warnings = dedupeWarnings([...(parsed.warnings || []), ...baseWarnings]);
+    const metrics = normalizeMetrics(intake, parsed.metrics, shots.length);
 
     return {
       title: String(parsed.title || intake.title).trim() || intake.title,
-      metrics: normalizeMetrics(intake, parsed.metrics, shots.length),
+      breakdownReport: normalizeBreakdownReport(intake, parsed.breakdownReport, metrics, shots, analysisBasis, warnings),
+      metrics,
       shots,
       sourceMeta,
       transcriptStatus: intake.transcriptStatus,
       analysisMode: hasTranscript ? 'full' : 'metadata',
       fallbackReason: hasTranscript ? undefined : 'no_transcript',
       analysisBasis,
-      warnings: dedupeWarnings([...(parsed.warnings || []), ...baseWarnings]),
+      warnings,
     };
   } catch (error) {
     const fallbackReason: BenchmarkFallbackReason = isApiKeyMissingError(error)
@@ -435,19 +660,23 @@ export const analyzeYouTubeBenchmark = async (
         ? '当前视频没有可用字幕，已退回为元数据层分析。'
         : `AI 结构化分析失败，已回退为降级结果：${toErrorMessage(error, '未知错误')}`;
 
+    const warnings = dedupeWarnings([
+      ...baseWarnings,
+      fallbackWarning,
+    ]);
+    const metrics = buildFallbackMetrics(intake);
+
     return {
       title: intake.title,
-      metrics: buildFallbackMetrics(intake),
+      breakdownReport: normalizeBreakdownReport(intake, '', metrics, [], analysisBasis, warnings),
+      metrics,
       shots: [],
       sourceMeta,
       transcriptStatus: intake.transcriptStatus,
       analysisMode: 'metadata',
       fallbackReason,
       analysisBasis,
-      warnings: dedupeWarnings([
-        ...baseWarnings,
-        fallbackWarning,
-      ]),
+      warnings,
     };
   }
 };

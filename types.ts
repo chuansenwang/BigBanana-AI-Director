@@ -907,6 +907,72 @@ export interface BenchmarkDownloadArtifact {
   warnings?: string[];
 }
 
+export type BenchmarkSliceStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+export interface BenchmarkSliceRequestMeta {
+  middleFrames?: number;
+  enableSceneDetect?: boolean;
+}
+
+export interface BenchmarkSliceManifestInput {
+  video_path: string;
+  sheet_path: string;
+  sheet_format?: string;
+  source_duration_seconds?: number;
+}
+
+export interface BenchmarkSliceManifestSummary {
+  total_rows?: number;
+  ok_rows?: number;
+  partial_rows?: number;
+  failed_rows?: number;
+}
+
+export interface BenchmarkSliceManifestShot {
+  row_index: number;
+  shot_number: string | number;
+  start_time: string;
+  end_time: string;
+  base_name: string;
+  status: 'ok' | 'partial' | 'failed';
+  clip_path: string;
+  first_frame_path: string;
+  last_frame_path: string;
+  middle_frame_path?: string;
+  middle_frame_paths?: string[];
+  duration_seconds: number;
+  warnings?: string[];
+  error_code?: string | null;
+  error_message?: string | null;
+  source_row?: Record<string, unknown>;
+}
+
+export interface BenchmarkSliceManifest {
+  schema_version?: string | number;
+  status: 'ok' | 'partial' | 'failed';
+  warnings?: string[];
+  inputs?: BenchmarkSliceManifestInput;
+  output_dir?: string;
+  clip_mode?: string;
+  summary?: BenchmarkSliceManifestSummary;
+  shots: BenchmarkSliceManifestShot[];
+}
+
+export interface BenchmarkSliceArtifact {
+  status: BenchmarkSliceStatus;
+  runId?: string;
+  requestedAt?: number;
+  finishedAt?: number;
+  manifestPath?: string;
+  outputDir?: string;
+  clipsDir?: string;
+  framesDir?: string;
+  manifest?: BenchmarkSliceManifest;
+  errorMessage?: string;
+  warnings?: string[];
+  requestMeta?: BenchmarkSliceRequestMeta;
+}
+
 export interface BenchmarkVideo {
   id: string;
   url: string;
@@ -925,4 +991,5 @@ export interface BenchmarkVideo {
   warnings?: string[];
   errorMessage?: string;
   downloadArtifact?: BenchmarkDownloadArtifact;
+  sliceArtifact?: BenchmarkSliceArtifact;
 }

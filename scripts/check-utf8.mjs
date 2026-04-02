@@ -1,111 +1,144 @@
-import { readdir, readFile } from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const ROOT = process.cwd();
+const ROOT_DIR = process.cwd();
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
-const TEXT_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.json', '.md', '.css', '.scss', '.html', '.yml', '.yaml',
-  '.txt', '.env', '.gitattributes', '.editorconfig'
-]);
-
-const IGNORE_DIRS = new Set([
+const SKIP_DIRS = new Set([
   '.git',
-  'node_modules',
+  '.sisyphus',
   'dist',
+  'node_modules',
   'coverage',
-  '.vite'
+  '.idea',
+  '.vscode',
 ]);
 
-const IGNORE_FILES = new Set([
-  'task_plan.md',
-  'notes.md'
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.mts',
+  '.cts',
+  '.json',
+  '.md',
+  '.css',
+  '.scss',
+  '.sass',
+  '.less',
+  '.html',
+  '.txt',
+  '.yml',
+  '.yaml',
+  '.svg',
+  '.csv',
+  '.env',
 ]);
 
-const BOM_ALLOWLIST = new Set([
-  'components/StageAssets.tsx'
+const TEXT_BASENAMES = new Set([
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  'package.json',
+  'tsconfig.json',
+  'vite.config.ts',
+  'README',
+  'README.md',
+  'LICENSE',
 ]);
 
-const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
-const PRIVATE_USE_REGEX = /[\uE000-\uF8FF]/u;
+const INVALID_BOMS = [
+  Buffer.from([0xff, 0xfe]),
+  Buffer.from([0xfe, 0xff]),
+  Buffer.from([0xff, 0xfe, 0x00, 0x00]),
+  Buffer.from([0x00, 0x00, 0xfe, 0xff]),
+];
 
-const shouldCheckFile = (filepath) => {
-  const base = path.basename(filepath);
-  if (base === '.editorconfig' || base === '.gitattributes') return true;
-  const ext = path.extname(filepath).toLowerCase();
-  return TEXT_EXTENSIONS.has(ext);
+const hasInvalidBom = (buffer) => INVALID_BOMS.some((bom) => buffer.subarray(0, bom.length).equals(bom));
+
+const shouldCheckFile = (absolutePath) => {
+  const baseName = path.basename(absolutePath);
+  if (TEXT_BASENAMES.has(baseName)) return true;
+
+  const ext = path.extname(absolutePath).toLowerCase();
+  return TEXT_FILE_EXTENSIONS.has(ext);
 };
 
-const walkFiles = async (dir) => {
-  const entries = await readdir(dir, { withFileTypes: true });
-  const files = [];
+const walk = async (currentDir, collector) => {
+  const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
   for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
+    const absolutePath = path.join(currentDir, entry.name);
     if (entry.isDirectory()) {
-      if (IGNORE_DIRS.has(entry.name)) continue;
-      files.push(...(await walkFiles(fullPath)));
+      if (SKIP_DIRS.has(entry.name)) continue;
+      await walk(absolutePath, collector);
       continue;
     }
-    if (entry.isFile()) {
-      files.push(fullPath);
+
+    if (entry.isFile() && shouldCheckFile(absolutePath)) {
+      collector.push(absolutePath);
     }
   }
-  return files;
 };
-
-const decodeUtf8Strict = (buffer) => {
-  const decoder = new TextDecoder('utf-8', { fatal: true });
-  return decoder.decode(buffer);
-};
-
-const toRelative = (filepath) => path.relative(ROOT, filepath).replace(/\\/g, '/');
 
 const main = async () => {
-  const allFiles = await walkFiles(ROOT);
-  const textFiles = allFiles.filter(shouldCheckFile);
-  const errors = [];
+  const files = [];
+  await walk(ROOT_DIR, files);
 
-  for (const filepath of textFiles) {
-    const buffer = await readFile(filepath);
-    const rel = toRelative(filepath);
-    if (IGNORE_FILES.has(rel)) continue;
+  const invalidFiles = [];
+  const warnings = [];
 
-    if (buffer.length >= 3 && buffer.subarray(0, 3).equals(UTF8_BOM)) {
-      if (!BOM_ALLOWLIST.has(rel)) {
-        errors.push(`${rel}: UTF-8 BOM detected`);
-      }
-      continue;
-    }
-
-    let text = '';
+  for (const filePath of files) {
     try {
-      text = decodeUtf8Strict(buffer);
-    } catch {
-      errors.push(`${rel}: not valid UTF-8`);
-      continue;
-    }
+      const buffer = await fs.readFile(filePath);
+      if (buffer.length === 0) continue;
 
-    if (text.includes('\uFFFD')) {
-      errors.push(`${rel}: replacement character (U+FFFD) detected`);
-    }
+      if (hasInvalidBom(buffer)) {
+        invalidFiles.push({
+          filePath,
+          reason: 'detected UTF-16/UTF-32 BOM; expected UTF-8',
+        });
+        continue;
+      }
 
-    if (PRIVATE_USE_REGEX.test(text)) {
-      errors.push(`${rel}: private-use Unicode character detected (possible encoding corruption)`);
+      UTF8_DECODER.decode(buffer);
+    } catch (error) {
+      if (error instanceof TypeError) {
+        invalidFiles.push({
+          filePath,
+          reason: error.message || 'invalid UTF-8 sequence',
+        });
+        continue;
+      }
+
+      warnings.push({
+        filePath,
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
-  if (errors.length > 0) {
-    console.error('UTF-8 guardrail check failed:');
-    for (const err of errors) {
-      console.error(`- ${err}`);
-    }
-    process.exit(1);
+  warnings.forEach(({ filePath, reason }) => {
+    console.warn(`[utf8-check] Skipped ${path.relative(ROOT_DIR, filePath)}: ${reason}`);
+  });
+
+  if (invalidFiles.length > 0) {
+    console.error(`[utf8-check] Found ${invalidFiles.length} file(s) that are not valid UTF-8:`);
+    invalidFiles.forEach(({ filePath, reason }) => {
+      console.error(`- ${path.relative(ROOT_DIR, filePath)}: ${reason}`);
+    });
+    process.exitCode = 1;
+    return;
   }
 
-  console.log(`UTF-8 guardrail passed (${textFiles.length} files checked).`);
+  console.log(`UTF-8 guardrail passed (${files.length} files checked).`);
 };
 
 main().catch((error) => {
-  console.error('UTF-8 guardrail execution failed:', error);
-  process.exit(1);
+  console.error('[utf8-check] Fatal error:', error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
 });

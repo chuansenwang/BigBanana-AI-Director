@@ -12,6 +12,7 @@ import {
   ViralSignal,
 } from '../types';
 import { normalizeAnalysisRecord } from './analysisOrchestrationService';
+import { resolveShotRange } from './benchmarkShotRangeService';
 import { createNewEpisode, createNewSeries, getEpisodesBySeries, getSeriesByProject, saveEpisode, saveSeries, saveSeriesProject } from './storageService';
 import { YouTubeBenchmarkIntake, fetchYouTubeBenchmarkIntake } from './youtubeBenchmarkService';
 
@@ -21,45 +22,6 @@ const clipText = (value: string, maxLength: number): string => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim();
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, maxLength - 1)}…`;
-};
-
-const parseTimecodeToMs = (value: string): number | null => {
-  const normalized = String(value || '').trim();
-  if (!normalized) return null;
-
-  const parts = normalized.split(':').map((part) => Number(part.trim()));
-  if (parts.some((part) => !Number.isFinite(part))) return null;
-
-  if (parts.length === 2) {
-    const [minutes, seconds] = parts;
-    return ((minutes * 60) + seconds) * 1000;
-  }
-
-  if (parts.length === 3) {
-    const [hours, minutes, seconds] = parts;
-    return (((hours * 60 * 60) + (minutes * 60) + seconds) * 1000);
-  }
-
-  return null;
-};
-
-const resolveShotRange = (shot: BenchmarkShotResult, index: number, total: number, durationSeconds?: number) => {
-  const matchedRange = String(shot.time || '').match(/(\d{1,2}:\d{2}(?::\d{2})?)\s*[-~—]\s*(\d{1,2}:\d{2}(?::\d{2})?)/);
-  const startMs = matchedRange ? parseTimecodeToMs(matchedRange[1]) : null;
-  const endMs = matchedRange ? parseTimecodeToMs(matchedRange[2]) : null;
-
-  if (startMs !== null && endMs !== null && endMs > startMs) {
-    return { startMs, endMs };
-  }
-
-  const totalDurationMs = durationSeconds && durationSeconds > 0 ? durationSeconds * 1000 : 0;
-  const fallbackSpanMs = totalDurationMs > 0 && total > 0 ? Math.max(1500, Math.floor(totalDurationMs / total)) : 3000;
-  const fallbackStartMs = index * fallbackSpanMs;
-
-  return {
-    startMs: fallbackStartMs,
-    endMs: totalDurationMs > 0 ? Math.min(totalDurationMs, fallbackStartMs + fallbackSpanMs) : fallbackStartMs + fallbackSpanMs,
-  };
 };
 
 const buildVisualNotes = (shot: BenchmarkShotResult): string | undefined => {

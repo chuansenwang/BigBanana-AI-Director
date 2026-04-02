@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import {
+  applyEnvDefaults,
   createMockRequest,
   createYouTubeBenchmarkHandler,
   getDownloaderCandidates,
   normalizeArtifactStorageConfig,
+  parseEnvFileContent,
 } from './youtubeBenchmarkProxyCore.mjs';
 
 const createMockResponse = () => {
@@ -66,6 +68,28 @@ test('download route rejects missing url', async () => {
   assert.equal(result.handled, true);
   assert.equal(result.res.statusCode, 400);
   assert.equal(result.json().ok, false);
+});
+
+test('parseEnvFileContent reads root .env style entries', () => {
+  const parsed = parseEnvFileContent(`\uFEFF# comment\nYOUTUBE_BENCHMARK_YTDLP_BIN=D:\\soft\\yt-dlp.exe\nexport YOUTUBE_BENCHMARK_ALLOW_PY_FALLBACK=false\nQUOTED_PATH="D:\\tools\\yt-dlp.exe"\n`);
+
+  assert.equal(parsed.YOUTUBE_BENCHMARK_YTDLP_BIN, 'D:\\soft\\yt-dlp.exe');
+  assert.equal(parsed.YOUTUBE_BENCHMARK_ALLOW_PY_FALLBACK, 'false');
+  assert.equal(parsed.QUOTED_PATH, 'D:\\tools\\yt-dlp.exe');
+});
+
+test('applyEnvDefaults does not overwrite existing process-style values', () => {
+  const targetEnv = {
+    YOUTUBE_BENCHMARK_YTDLP_BIN: 'C:\\existing\\yt-dlp.exe',
+  };
+
+  applyEnvDefaults({
+    YOUTUBE_BENCHMARK_YTDLP_BIN: 'D:\\soft\\yt-dlp.exe',
+    YOUTUBE_BENCHMARK_ALLOW_PY_FALLBACK: 'false',
+  }, targetEnv);
+
+  assert.equal(targetEnv.YOUTUBE_BENCHMARK_YTDLP_BIN, 'C:\\existing\\yt-dlp.exe');
+  assert.equal(targetEnv.YOUTUBE_BENCHMARK_ALLOW_PY_FALLBACK, 'false');
 });
 
 test('download route rejects unsafe artifact directory rules', async () => {
@@ -177,11 +201,42 @@ test('download route surfaces downloader errors', async () => {
   assert.match(result.res.toBuffer().toString('utf8'), /yt-dlp missing/);
 });
 
-test('downloader candidates include python fallback', () => {
-  const candidates = getDownloaderCandidates('custom-ytdlp.exe');
+test('downloader candidates on Windows prefer executable resolution without python fallback by default', () => {
+  const candidates = getDownloaderCandidates('custom-ytdlp.exe', { platform: 'win32' });
+  assert.equal(candidates[0].label, 'custom-ytdlp.exe');
+  assert.equal(candidates.some((candidate) => candidate.label === 'yt-dlp'), true);
+  assert.equal(candidates.some((candidate) => candidate.label === 'py -m yt_dlp'), false);
+});
+
+test('downloader candidates can opt into python fallback on Windows', () => {
+  const candidates = getDownloaderCandidates('custom-ytdlp.exe', {
+    platform: 'win32',
+    allowPythonFallback: true,
+  });
+
   assert.equal(candidates[0].label, 'custom-ytdlp.exe');
   assert.equal(candidates.some((candidate) => candidate.label === 'yt-dlp'), true);
   assert.equal(candidates.at(-1)?.label, 'py -m yt_dlp');
+});
+
+test('downloader candidates can enable python fallback on non-Windows platforms', () => {
+  const candidates = getDownloaderCandidates('custom-ytdlp', {
+    platform: 'linux',
+    allowPythonFallback: true,
+  });
+
+  assert.equal(candidates[0].label, 'custom-ytdlp');
+  assert.equal(candidates.at(-1)?.label, 'py -m yt_dlp');
+});
+
+test('downloader candidates honor explicit python-fallback disable on non-Windows platforms', () => {
+  const candidates = getDownloaderCandidates('custom-ytdlp', {
+    platform: 'linux',
+    allowPythonFallback: false,
+  });
+
+  assert.equal(candidates[0].label, 'custom-ytdlp');
+  assert.equal(candidates.some((candidate) => candidate.label === 'py -m yt_dlp'), false);
 });
 
 test('artifact storage accepts absolute Windows root folder', () => {

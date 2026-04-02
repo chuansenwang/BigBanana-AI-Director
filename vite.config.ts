@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import { createLocalAnalysisProxyHandler } from './server/localAnalysisProxyCore.mjs';
 import { createNewApiProxyHandler } from './server/newApiProxyCore.mjs';
 import { createModelProxyHandler } from './server/modelProxyCore.mjs';
+import { createStoryboardSlicingHandler } from './server/storyboardSlicingProxyCore.mjs';
 import { createYouTubeBenchmarkHandler } from './server/youtubeBenchmarkProxyCore.mjs';
 
 const createDevMediaProxyPlugin = (): Plugin => ({
@@ -111,6 +112,17 @@ const createDevYouTubeBenchmarkProxyPlugin = (): Plugin => ({
   },
 });
 
+const createDevStoryboardSlicingProxyPlugin = (): Plugin => ({
+  name: 'dev-storyboard-slicing-proxy',
+  configureServer(server) {
+    const handler = createStoryboardSlicingHandler();
+    server.middlewares.use(async (req, res, next) => {
+      const handled = await handler(req, res);
+      if (!handled) next();
+    });
+  },
+});
+
 const createDevLocalAnalysisProxyPlugin = (): Plugin => ({
   name: 'dev-local-analysis-proxy',
   configureServer(server) {
@@ -129,7 +141,7 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
       },
-      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin(), createDevModelProxyPlugin(), createDevYouTubeBenchmarkProxyPlugin(), createDevLocalAnalysisProxyPlugin()],
+      plugins: [react(), createDevMediaProxyPlugin(), createDevNewApiProxyPlugin(), createDevModelProxyPlugin(), createDevYouTubeBenchmarkProxyPlugin(), createDevStoryboardSlicingProxyPlugin(), createDevLocalAnalysisProxyPlugin()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.ANTSK_API_KEY),
         'process.env.ANTSK_API_KEY': JSON.stringify(env.ANTSK_API_KEY)

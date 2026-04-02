@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Plus, Trash2, Loader2, Folder, ChevronDown, ChevronRight, Calendar, AlertTriangle, X, Cpu, Archive, Search, SearchCheck, Sparkles, LayoutPanelTop, Users, MapPin, Package, Database, Settings, Sun, Moon, Film, ExternalLink, User, Link as LinkIcon, Wand2 } from 'lucide-react';
-import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo, BenchmarkDownloadArtifact } from '../types';
+import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo, BenchmarkDownloadArtifact, BenchmarkSliceArtifact, BenchmarkSliceManifestShot } from '../types';
 import { getAllSeriesProjects, createNewSeriesProject, saveSeriesProject, deleteSeriesProject, createNewSeries, saveSeries, createNewEpisode, saveEpisode, getAllAssetLibraryItems, deleteAssetFromLibrary, exportIndexedDBData, getAllBenchmarkVideos, saveBenchmarkVideo, deleteBenchmarkVideo } from '../services/storageService';
 import { useAlert } from './GlobalAlert';
 import { useTheme } from '../contexts/ThemeContext';
@@ -14,6 +14,7 @@ import { DIRECTOR_HUB_URL } from '../constants/links';
 import { analyzeYouTubeBenchmark, downloadYouTubeBenchmarkVideo, fetchYouTubeBenchmarkIntake } from '../services/youtubeBenchmarkService';
 import { importBenchmarkToProject } from '../services/benchmarkImportService';
 import { loadArtifactStorageUserConfig } from '../services/artifactStorageConfigService';
+import { buildBenchmarkSlicingShots, buildStoryboardSlicingAssetUrl, runBenchmarkSlicing } from '../services/storyboardSlicingService';
 
 interface Props {
   onOpenProject: (project: ProjectState) => void;
@@ -245,6 +246,7 @@ interface MockSliceFrame {
   timecode: string;
   caption: string;
   tone: MockSliceFrameTone;
+  imageUrl?: string;
 }
 
 interface MockSliceShot {
@@ -264,6 +266,115 @@ interface MockSliceShot {
   promptFocus: string;
   frames: MockSliceFrame[];
 }
+
+interface SliceFrameViewerState {
+  imageUrl: string;
+  shotTitle: string;
+  frameLabel: string;
+  timecode: string;
+}
+
+const readSliceSourceValue = (sourceRow: Record<string, unknown> | undefined, ...keys: string[]): string | undefined => {
+  for (const key of keys) {
+    const value = sourceRow?.[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return undefined;
+};
+
+const parseSliceTimecodeToSeconds = (value?: string): number | null => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+
+  const segments = normalized.split(':');
+  const parsedSegments = segments.map((segment) => Number(segment));
+  if (parsedSegments.some((segment) => !Number.isFinite(segment))) return null;
+
+  if (parsedSegments.length === 2) {
+    const [minutes, seconds] = parsedSegments;
+    return (minutes * 60) + seconds;
+  }
+
+  if (parsedSegments.length === 3) {
+    const [hours, minutes, seconds] = parsedSegments;
+    return (hours * 3600) + (minutes * 60) + seconds;
+  }
+
+  return null;
+};
+
+const formatSliceDurationLabel = (seconds?: number): string => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return '-';
+  return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1).replace(/\.0$/, '')} 秒`;
+};
+
+const buildSlicePreviewFrames = (shot: BenchmarkSliceManifestShot, sourceRow?: Record<string, unknown>, outputDir?: string): MockSliceFrame[] => {
+  const startSeconds = parseSliceTimecodeToSeconds(shot.start_time);
+  const endSeconds = parseSliceTimecodeToSeconds(shot.end_time);
+  const midpointSeconds = startSeconds !== null && endSeconds !== null ? (startSeconds + endSeconds) / 2 : null;
+  const summary = readSliceSourceValue(sourceRow, 'summary', 'beat_summary', 'notes', 'desc') || '用于快速浏览当前镜头的节奏和构图。';
+  const middlePath = shot.middle_frame_path || shot.middle_frame_paths?.[0];
+
+  return [
+    {
+      id: `${shot.base_name}-first`,
+      label: '首帧',
+      timecode: shot.start_time,
+      caption: `起始落点：${summary}`,
+      tone: 'warning',
+      imageUrl: buildStoryboardSlicingAssetUrl(shot.first_frame_path, outputDir),
+    },
+    {
+      id: `${shot.base_name}-middle`,
+      label: '中段',
+      timecode: midpointSeconds !== null ? formatMockSliceTimecode(midpointSeconds) : shot.start_time,
+      caption: readSliceSourceValue(sourceRow, 'middle_caption', 'prompt_focus') || '中段参考帧用于查看镜头中段的信息密度与动作推进。',
+      tone: 'accent',
+      imageUrl: buildStoryboardSlicingAssetUrl(middlePath, outputDir),
+    },
+    {
+      id: `${shot.base_name}-last`,
+      label: '尾帧',
+      timecode: shot.end_time,
+      caption: readSliceSourceValue(sourceRow, 'tail_caption', 'adjustment') || '尾帧用于确认镜头收束、转场落点与可衔接性。',
+      tone: 'success',
+      imageUrl: buildStoryboardSlicingAssetUrl(shot.last_frame_path, outputDir),
+    },
+  ];
+};
+
+const mapSliceArtifactToPreviewShots = (sliceArtifact?: BenchmarkSliceArtifact): MockSliceShot[] => {
+  const manifestShots = sliceArtifact?.manifest?.shots || [];
+  return manifestShots
+    .filter((shot) => shot.status !== 'failed' || shot.first_frame_path || shot.last_frame_path)
+    .map((shot, index) => {
+      const sourceRow = shot.source_row;
+      const indexLabel = String(shot.shot_number || index + 1).padStart(2, '0');
+      const durationSeconds = typeof shot.duration_seconds === 'number' && Number.isFinite(shot.duration_seconds) ? shot.duration_seconds : 0;
+      const title = readSliceSourceValue(sourceRow, 'title') || `镜头 ${indexLabel}`;
+      const beatSummary = readSliceSourceValue(sourceRow, 'summary', 'beat_summary', 'notes', 'desc') || '当前镜头已完成拆片，可继续检查三帧和节奏落点。';
+
+      return {
+        id: shot.base_name || `slice-shot-${indexLabel}`,
+        indexLabel,
+        startSecond: parseSliceTimecodeToSeconds(shot.start_time) ?? index * 3,
+        endSecond: parseSliceTimecodeToSeconds(shot.end_time) ?? ((index + 1) * 3),
+        durationSeconds,
+        title,
+        timeRange: `${shot.start_time} - ${shot.end_time}`,
+        durationLabel: formatSliceDurationLabel(durationSeconds),
+        beatSummary,
+        transition: readSliceSourceValue(sourceRow, 'transition', 'transition_mode') || shot.status,
+        cameraLanguage: readSliceSourceValue(sourceRow, 'camera_language', 'camera_movement', 'camera') || '-',
+        emotionAnchor: readSliceSourceValue(sourceRow, 'emotion_anchor', 'emotion') || '-',
+        soundDesign: readSliceSourceValue(sourceRow, 'sound_design', 'sound') || '-',
+        promptFocus: readSliceSourceValue(sourceRow, 'prompt_focus', 'props_vfx', 'visual_focus') || '-',
+        frames: buildSlicePreviewFrames(shot, sourceRow, sliceArtifact?.outputDir),
+      };
+    });
+};
 
 interface MockSliceFrameTemplate {
   label: MockSliceFrameLabel;
@@ -622,7 +733,8 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const [isBenchmarkBreakdownExpanded, setIsBenchmarkBreakdownExpanded] = useState(false);
   const [benchmarkBreakdownDraft, setBenchmarkBreakdownDraft] = useState('');
   const [isSavingBenchmarkBreakdown, setIsSavingBenchmarkBreakdown] = useState(false);
-  const [selectedMockSliceShotId, setSelectedMockSliceShotId] = useState(DEFAULT_MOCK_SLICE_SHOT_ID);
+  const [selectedSliceShotId, setSelectedSliceShotId] = useState(DEFAULT_MOCK_SLICE_SHOT_ID);
+  const [sliceFrameViewer, setSliceFrameViewer] = useState<SliceFrameViewerState | null>(null);
   const [activeBenchmarkDownloadArtifacts, setActiveBenchmarkDownloadArtifacts] = useState<Record<string, BenchmarkDownloadArtifact>>({});
 
   const loadBenchmarks = async () => {
@@ -696,7 +808,20 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const shouldShowModelConfigAction = currentBenchmark?.fallbackReason === 'missing_api_key' && !!onShowModelConfig;
   const benchmarkBreakdownDisplayText = getBenchmarkBreakdownDisplayText(currentBenchmark);
   const isBenchmarkBreakdownEditable = !!currentBenchmark && currentBenchmark.status !== 'analyzing';
-  const selectedMockSliceShot = MOCK_SLICE_SHOTS.find((shot) => shot.id === selectedMockSliceShotId) || MOCK_SLICE_SHOTS[0] || null;
+  const availableSlicingShots = currentBenchmark ? buildBenchmarkSlicingShots(currentBenchmark) : [];
+  const currentSliceShots = currentBenchmark?.sliceArtifact?.manifest?.shots?.length
+    ? mapSliceArtifactToPreviewShots(currentBenchmark.sliceArtifact)
+    : MOCK_SLICE_SHOTS;
+  const selectedSliceShot = currentSliceShots.find((shot) => shot.id === selectedSliceShotId) || currentSliceShots[0] || null;
+  const isUsingRealSliceData = !!currentBenchmark?.sliceArtifact?.manifest?.shots?.length;
+  const currentSliceArtifact = currentBenchmark?.sliceArtifact;
+  const isSliceRunning = currentSliceArtifact?.status === 'running';
+  const canRunSlicing = !!currentBenchmark && currentBenchmark.status === 'completed' && !!currentDownloadArtifact?.localPath && availableSlicingShots.length > 0 && !isSliceRunning;
+  const sliceCoverageSeconds = currentSliceShots.length > 0
+    ? currentSliceShots[currentSliceShots.length - 1].endSecond - currentSliceShots[0].startSecond
+    : 0;
+  const sliceCoverageLabel = formatMockSliceTimestamp(sliceCoverageSeconds);
+  const sliceFrameCount = currentSliceShots.reduce((total, shot) => total + shot.frames.length, 0);
 
   useEffect(() => {
     setIsEditingBenchmarkBreakdown(false);
@@ -706,8 +831,50 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   }, [currentBenchmarkId, currentBenchmark?.lastModified, benchmarkBreakdownDisplayText]);
 
   useEffect(() => {
-    setSelectedMockSliceShotId(DEFAULT_MOCK_SLICE_SHOT_ID);
+    setSelectedSliceShotId('');
   }, [currentBenchmarkId]);
+
+  useEffect(() => {
+    if (!selectedSliceShotId && currentSliceShots[0]?.id) {
+      setSelectedSliceShotId(currentSliceShots[0].id);
+      return;
+    }
+    if (selectedSliceShotId && !currentSliceShots.some((shot) => shot.id === selectedSliceShotId)) {
+      setSelectedSliceShotId(currentSliceShots[0]?.id || '');
+    }
+  }, [currentSliceShots, selectedSliceShotId]);
+
+  useEffect(() => {
+    if (!sliceFrameViewer) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSliceFrameViewer(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [sliceFrameViewer]);
+
+  const handleOpenSliceFrameViewer = (frame: MockSliceFrame, shot: MockSliceShot) => {
+    if (!frame.imageUrl) {
+      return;
+    }
+
+    setSliceFrameViewer({
+      imageUrl: frame.imageUrl,
+      shotTitle: shot.title,
+      frameLabel: frame.label,
+      timecode: frame.timecode,
+    });
+  };
+
+  const handleCloseSliceFrameViewer = () => {
+    setSliceFrameViewer(null);
+  };
 
   const handleStartEditBenchmarkBreakdown = () => {
     if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
@@ -748,6 +915,73 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       showAlert(`保存拆解方案失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
     } finally {
       setIsSavingBenchmarkBreakdown(false);
+    }
+  };
+
+  const handleRunBenchmarkSlicing = async () => {
+    if (!currentBenchmark) return;
+    if (!currentDownloadArtifact?.localPath) {
+      showAlert('当前记录还没有本地视频文件，请先完成下载。', { type: 'warning' });
+      return;
+    }
+    if (availableSlicingShots.length === 0) {
+      showAlert('当前记录缺少可解析的镜头时间表；请先补充结构化拆解方案。', { type: 'warning' });
+      return;
+    }
+
+    const requestedAt = Date.now();
+    const runningBenchmark: BenchmarkVideo = {
+      ...currentBenchmark,
+      sliceArtifact: {
+        ...(currentBenchmark.sliceArtifact || {}),
+        status: 'running',
+        requestedAt,
+        finishedAt: undefined,
+        errorMessage: undefined,
+        warnings: [],
+        requestMeta: {
+          middleFrames: 1,
+          enableSceneDetect: false,
+        },
+      },
+    };
+
+    try {
+      await saveBenchmarkVideo(runningBenchmark);
+      await loadBenchmarks();
+      setCurrentBenchmarkId(currentBenchmark.id);
+
+      const completedSliceArtifact = await runBenchmarkSlicing(currentBenchmark, {
+        middleFrames: 1,
+        enableSceneDetect: false,
+      });
+
+      await saveBenchmarkVideo({
+        ...currentBenchmark,
+        sliceArtifact: {
+          ...completedSliceArtifact,
+          requestedAt,
+          finishedAt: Date.now(),
+        },
+      });
+      await loadBenchmarks();
+      setCurrentBenchmarkId(currentBenchmark.id);
+      showAlert('拆片镜头已生成，可在下方预览真实切片结果。', { type: 'success' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '拆片失败';
+      await saveBenchmarkVideo({
+        ...currentBenchmark,
+        sliceArtifact: {
+          ...(currentBenchmark.sliceArtifact || {}),
+          status: 'failed',
+          requestedAt,
+          finishedAt: Date.now(),
+          errorMessage: message,
+        },
+      });
+      await loadBenchmarks();
+      setCurrentBenchmarkId(currentBenchmark.id);
+      showAlert(message, { type: 'error' });
     }
   };
 
@@ -1495,6 +1729,15 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                     <div className="flex flex-wrap items-center gap-3">
                                       <button
                                         type="button"
+                                        onClick={handleRunBenchmarkSlicing}
+                                        disabled={!canRunSlicing}
+                                        className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-[11px] font-bold transition-colors ${canRunSlicing ? 'bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]' : 'border border-[var(--border-secondary)] bg-[var(--bg-primary)] text-[var(--text-muted)] opacity-70'}`}
+                                      >
+                                        {isSliceRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                                        {currentSliceArtifact?.status === 'completed' ? '重新生成拆片镜头' : isSliceRunning ? '拆片中...' : '生成拆片镜头'}
+                                      </button>
+                                      <button
+                                        type="button"
                                         onClick={() => setBenchmarkToImport(currentBenchmark)}
                                         disabled={projects.length === 0}
                                         className="inline-flex items-center gap-2 rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-bold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
@@ -1505,6 +1748,12 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       <span className="text-[10px] font-mono text-[var(--text-muted)]">
                                         {projects.length > 0 ? '将创建新的 analysis Episode，并保留当前对标结论。' : '请先创建项目再导入。'}
                                       </span>
+                                      {!currentDownloadArtifact?.localPath && (
+                                        <span className="text-[10px] font-mono text-[var(--warning)]">需先拿到本地视频路径后才能拆片。</span>
+                                      )}
+                                      {currentDownloadArtifact?.localPath && availableSlicingShots.length === 0 && (
+                                        <span className="text-[10px] font-mono text-[var(--warning)]">当前拆解方案里还没有可解析的镜头时间表。</span>
+                                      )}
                                     </div>
                                   )}
                                 <div className="grid grid-cols-2 gap-3 text-[11px] text-[var(--text-tertiary)] md:text-right">
@@ -1593,6 +1842,19 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                               {currentBenchmark.errorMessage && (
                                 <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-hover-bg)] px-3 py-2 text-xs leading-6 text-[var(--error-text)]">
                                   {currentBenchmark.errorMessage}
+                                </div>
+                              )}
+
+                              {currentSliceArtifact?.status === 'failed' && currentSliceArtifact.errorMessage && (
+                                <div className="rounded-md border border-[var(--error-border)] bg-[var(--error-hover-bg)] px-3 py-2 text-xs leading-6 text-[var(--error-text)]">
+                                  拆片失败：{currentSliceArtifact.errorMessage}
+                                </div>
+                              )}
+
+                              {currentSliceArtifact?.status === 'completed' && (
+                                <div className="rounded-md border border-[var(--success-border)] bg-[var(--success-bg)] px-3 py-2 text-xs leading-6 text-[var(--success-text)]">
+                                  已生成真实拆片结果：{currentSliceArtifact.manifest?.summary?.ok_rows ?? currentSliceArtifact.manifest?.shots?.length ?? 0} 条镜头可预览。
+                                  {currentSliceArtifact.outputDir ? <span className="ml-2 font-mono break-all">{currentSliceArtifact.outputDir}</span> : null}
                                 </div>
                               )}
 
@@ -1686,7 +1948,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                             </div>
                           )}
 
-                          {currentBenchmarkId && currentBenchmark && selectedMockSliceShot && (
+                          {currentBenchmarkId && currentBenchmark && selectedSliceShot && (
                             <div className="mt-6 rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-5 md:p-6 space-y-5">
                               <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                                 <div className="space-y-2 max-w-3xl">
@@ -1697,16 +1959,18 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                   <div>
                                     <h4 className="text-sm font-bold tracking-wide text-[var(--text-primary)]">拆片镜头预览面板</h4>
                                     <p className="mt-1 text-[11px] leading-6 text-[var(--text-muted)]">
-                                      当前区域使用模拟切片数据，为《{currentBenchmark.title}》预演镜头浏览、三帧对照和后续操作层级，方便先把交互与视觉节奏调顺。
+                                      {isUsingRealSliceData
+                                        ? `当前区域正在展示《${currentBenchmark.title}》的真实拆片结果，可直接浏览镜头、三帧参考和后续衍生入口。`
+                                        : `当前区域仍使用模拟切片数据；点击上方“生成拆片镜头”后，会替换成《${currentBenchmark.title}》的真实结果。`}
                                     </p>
                                   </div>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[420px]">
                                   {[
-                                    { label: 'Mock 镜头', value: `${MOCK_SLICE_SHOTS.length} 条` },
-                                    { label: '关键帧卡', value: `${MOCK_SLICE_TOTAL_FRAMES} 张` },
-                                    { label: '覆盖时长', value: MOCK_SLICE_TOTAL_COVERAGE_LABEL },
-                                    { label: '当前选择', value: `镜头 ${selectedMockSliceShot.indexLabel}` },
+                                    { label: isUsingRealSliceData ? '真实镜头' : 'Mock 镜头', value: `${currentSliceShots.length} 条` },
+                                    { label: '关键帧卡', value: `${sliceFrameCount} 张` },
+                                    { label: '覆盖时长', value: sliceCoverageLabel },
+                                    { label: '当前选择', value: `镜头 ${selectedSliceShot.indexLabel}` },
                                   ].map((item) => (
                                     <div key={item.label} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
                                       <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--text-muted)]">{item.label}</div>
@@ -1724,19 +1988,19 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要精修的段落</div>
                                     </div>
                                     <div className="text-[11px] text-[var(--text-tertiary)] xl:max-w-xs">
-                                      所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。
+                                      {isUsingRealSliceData ? '当前列表来自真实切片 manifest；选中后，右侧会固定显示首中尾三帧、节奏摘要和元数据。' : '所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。'}
                                     </div>
                                   </div>
 
                                   <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-                                    {MOCK_SLICE_SHOTS.map((shot) => {
-                                      const isActive = shot.id === selectedMockSliceShot.id;
+                                    {currentSliceShots.map((shot) => {
+                                      const isActive = shot.id === selectedSliceShot.id;
                                       return (
                                         <button
                                           key={shot.id}
                                           type="button"
                                           aria-pressed={isActive}
-                                          onClick={() => setSelectedMockSliceShotId(shot.id)}
+                                          onClick={() => setSelectedSliceShotId(shot.id)}
                                           className={`group rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]'}`}
                                         >
                                           <div className="flex items-center justify-between gap-3">
@@ -1760,18 +2024,18 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                                         <div>
                                           <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">选中镜头详情</div>
-                                          <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedMockSliceShot.indexLabel} · {selectedMockSliceShot.title}</div>
-                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedMockSliceShot.beatSummary}</div>
+                                          <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedSliceShot.indexLabel} · {selectedSliceShot.title}</div>
+                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedSliceShot.beatSummary}</div>
                                         </div>
-                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedMockSliceShot.timeRange}</div>
+                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceShot.timeRange}</div>
                                       </div>
                                       <p className="text-[11px] leading-5 text-[var(--text-muted)]">
-                                        浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和 mock 操作会固定保留在右侧，方便持续对照。
+                                        浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和后续操作会固定保留在右侧，方便持续对照。
                                       </p>
                                     </div>
 
                                     <div className="space-y-3">
-                                      {selectedMockSliceShot.frames.map((frame) => {
+                                      {selectedSliceShot.frames.map((frame) => {
                                         const toneClasses = getMockSliceFrameToneClasses(frame.tone);
                                         return (
                                           <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
@@ -1782,18 +2046,33 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                               <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
                                             </div>
 
-                                            <div className="relative h-40 overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[linear-gradient(135deg,var(--bg-hover)_0%,var(--bg-sunken)_100%)] px-4 py-4">
-                                              <div className={`absolute -right-8 top-5 h-24 w-24 rounded-full blur-2xl ${toneClasses.glow}`} />
-                                              <div className="absolute inset-x-4 top-4 flex items-start justify-between">
-                                                <div className="h-10 w-16 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)]/60" />
-                                                <div className="h-7 w-7 rounded-full border border-[var(--border-secondary)] bg-[var(--bg-primary)]/50" />
+                                            {frame.imageUrl ? (
+                                              <button
+                                                type="button"
+                                                onClick={() => handleOpenSliceFrameViewer(frame, selectedSliceShot)}
+                                                className="group relative block w-full aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 text-left transition-colors hover:border-[var(--border-secondary)]"
+                                                aria-label={`查看${selectedSliceShot.title}${frame.label}大图`}
+                                              >
+                                                <img src={frame.imageUrl} alt={`${selectedSliceShot.title} ${frame.label}`} className="h-full w-full rounded-lg object-contain" />
+                                                <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between rounded-b-lg bg-[var(--bg-base)]/82 px-3 py-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                                                  <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-secondary)]">点击查看大图</span>
+                                                  <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
+                                                </div>
+                                              </button>
+                                            ) : (
+                                              <div className="relative aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[linear-gradient(135deg,var(--bg-hover)_0%,var(--bg-sunken)_100%)] px-4 py-4">
+                                                <div className={`absolute -right-8 top-5 h-24 w-24 rounded-full blur-2xl ${toneClasses.glow}`} />
+                                                <div className="absolute inset-x-4 top-4 flex items-start justify-between">
+                                                  <div className="h-10 w-16 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)]/60" />
+                                                  <div className="h-7 w-7 rounded-full border border-[var(--border-secondary)] bg-[var(--bg-primary)]/50" />
+                                                </div>
+                                                <div className="absolute inset-x-4 bottom-4 space-y-2">
+                                                  <div className={`h-1.5 w-16 rounded-full ${toneClasses.line}`} />
+                                                  <div className="h-1.5 w-24 rounded-full bg-[var(--border-secondary)]" />
+                                                  <div className="h-1.5 w-20 rounded-full bg-[var(--border-secondary)]/70" />
+                                                </div>
                                               </div>
-                                              <div className="absolute inset-x-4 bottom-4 space-y-2">
-                                                <div className={`h-1.5 w-16 rounded-full ${toneClasses.line}`} />
-                                                <div className="h-1.5 w-24 rounded-full bg-[var(--border-secondary)]" />
-                                                <div className="h-1.5 w-20 rounded-full bg-[var(--border-secondary)]/70" />
-                                              </div>
-                                            </div>
+                                            )}
 
                                             <div>
                                               <div className="text-[11px] font-semibold text-[var(--text-primary)]">{frame.caption}</div>
@@ -1808,12 +2087,12 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头元数据</div>
                                       <div className="mt-4 space-y-3">
                                         {[
-                                          { label: '镜头时长', value: selectedMockSliceShot.durationLabel },
-                                          { label: '转场方式', value: selectedMockSliceShot.transition },
-                                          { label: '运镜语言', value: selectedMockSliceShot.cameraLanguage },
-                                          { label: '情绪落点', value: selectedMockSliceShot.emotionAnchor },
-                                          { label: '声音设计', value: selectedMockSliceShot.soundDesign },
-                                          { label: '提示词聚焦', value: selectedMockSliceShot.promptFocus },
+                                          { label: '镜头时长', value: selectedSliceShot.durationLabel },
+                                          { label: '转场方式', value: selectedSliceShot.transition },
+                                          { label: '运镜语言', value: selectedSliceShot.cameraLanguage },
+                                          { label: '情绪落点', value: selectedSliceShot.emotionAnchor },
+                                          { label: '声音设计', value: selectedSliceShot.soundDesign },
+                                          { label: '提示词聚焦', value: selectedSliceShot.promptFocus },
                                         ].map((item) => (
                                           <div key={item.label} className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
                                             <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{item.label}</div>
@@ -1824,7 +2103,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                     </div>
 
                                     <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
-                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">Mock 操作</div>
+                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">后续操作</div>
                                       <div className="mt-4 space-y-3">
                                         <button
                                           type="button"
@@ -1852,7 +2131,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                         </button>
                                       </div>
                                       <p className="mt-4 text-[11px] leading-5 text-[var(--text-muted)]">
-                                        这一组按钮目前仅用于确认右侧检视器中的信息层级与视觉反馈，后续接入真实切片结果时可直接复用当前布局。
+                                        当前这一组按钮主要用于承接后续镜头批注、三帧导出和同步导演台等动作；真实切片结果已经可以直接复用这套布局。
                                       </p>
                                     </div>
                                   </div>
@@ -2012,6 +2291,40 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
           </main>
         </div>
       </div>
+
+      {sliceFrameViewer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)]/88 p-4 md:p-6" onClick={handleCloseSliceFrameViewer}>
+          <div
+            className="relative w-full max-w-6xl rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-3 md:p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-4 border-b border-[var(--border-subtle)] px-1 pb-3">
+              <div className="min-w-0">
+                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">Slice Frame Viewer</div>
+                <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{sliceFrameViewer.shotTitle} · {sliceFrameViewer.frameLabel}</div>
+                <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">时间码 {sliceFrameViewer.timecode} · 点击遮罩或右上角关闭</div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseSliceFrameViewer}
+                className="inline-flex items-center justify-center rounded-lg border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-2 text-[var(--text-tertiary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                title="关闭预览"
+                aria-label="关闭预览"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex max-h-[calc(100vh-10rem)] items-center justify-center overflow-auto rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3 md:px-4 md:py-4">
+              <img
+                src={sliceFrameViewer.imageUrl}
+                alt={`${sliceFrameViewer.shotTitle} ${sliceFrameViewer.frameLabel}`}
+                className="max-h-[calc(100vh-12rem)] w-full object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Settings Modal */}
       {showSettingsModal && (
