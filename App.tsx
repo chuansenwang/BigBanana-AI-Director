@@ -14,7 +14,7 @@ import NewApiConsole from './components/NewApiConsole';
 import Onboarding, { shouldShowOnboarding, resetOnboarding } from './components/Onboarding';
 import ModelConfigModal from './components/ModelConfig';
 import { ProjectState } from './types';
-import { Save, CheckCircle } from 'lucide-react';
+import { Save, CheckCircle, AlertTriangle, RefreshCw, ArrowLeft } from 'lucide-react';
 import { saveEpisode, loadEpisode } from './services/storageService';
 import { setGlobalApiKey } from './services/aiService';
 import { setLogCallback, clearLogCallback } from './services/renderLogService';
@@ -97,8 +97,75 @@ function MobileWarning() {
   );
 }
 
+type EpisodeLoadError = {
+  kind: 'not_found' | 'load_failed';
+  message: string;
+};
+
+const isEpisodeNotFoundError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const normalizedMessage = error.message.trim().toLowerCase();
+  return normalizedMessage === 'episode not found' || normalizedMessage.endsWith('not found');
+};
+
+function EpisodeLoadErrorState({
+  error,
+  onRetry,
+  onBack,
+}: {
+  error: EpisodeLoadError;
+  onRetry: () => void;
+  onBack?: () => void;
+}) {
+  const title = error.kind === 'not_found' ? '当前剧集不存在' : '当前页面加载失败';
+  const description = error.kind === 'not_found'
+    ? '这个剧集可能已被删除，或者当前链接对应的数据已不在本地数据库中。'
+    : '本地数据读取失败，页面已保留在当前地址。你可以先重试，如果问题持续，再返回项目页检查数据。';
+
+  return (
+    <div className="h-screen bg-[var(--bg-secondary)] flex items-center justify-center p-6">
+      <div className="w-full max-w-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] rounded-2xl p-8 md:p-10 shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
+        <div className="inline-flex items-center gap-3 rounded-full border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-2 text-[var(--text-tertiary)] text-xs font-mono uppercase tracking-[0.24em]">
+          <AlertTriangle className="w-4 h-4 text-[var(--warning)]" />
+          Load Error
+        </div>
+
+        <div className="mt-6 space-y-4">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-semibold text-[var(--text-primary)] tracking-tight">{title}</h1>
+            <p className="mt-3 text-sm md:text-base leading-7 text-[var(--text-tertiary)]">{description}</p>
+          </div>
+
+          <div className="border border-[var(--border-subtle)] bg-[var(--bg-sunken)] rounded-xl px-4 py-3 text-xs md:text-sm text-[var(--text-muted)] font-mono break-all">
+            {error.message}
+          </div>
+        </div>
+
+        <div className="mt-8 flex flex-wrap gap-3">
+          <button
+            onClick={onRetry}
+            className="inline-flex items-center gap-2 px-5 py-3 bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:bg-[var(--btn-primary-hover)] transition-colors text-xs font-bold uppercase tracking-widest"
+          >
+            <RefreshCw className="w-4 h-4" />
+            重新加载
+          </button>
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="inline-flex items-center gap-2 px-5 py-3 border border-[var(--border-primary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)] transition-colors text-xs font-bold uppercase tracking-widest"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              返回项目页
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EpisodeWorkspace() {
-  const { episodeId } = useParams<{ episodeId: string }>();
+  const { projectId, episodeId } = useParams<{ projectId: string; episodeId: string }>();
   const navigate = useNavigate();
   const { showAlert } = useAlert();
   const {
@@ -117,6 +184,9 @@ function EpisodeWorkspace() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showModelConfig, setShowModelConfig] = useState(false);
   const [modelConfigVersion, setModelConfigVersion] = useState(0);
+  const [episodeLoadStatus, setEpisodeLoadStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [episodeLoadError, setEpisodeLoadError] = useState<EpisodeLoadError | null>(null);
+  const [reloadVersion, setReloadVersion] = useState(0);
   const saveTimeoutRef = useRef<any>(null);
   const hideStatusTimeoutRef = useRef<any>(null);
 
@@ -126,10 +196,44 @@ function EpisodeWorkspace() {
   };
 
   useEffect(() => {
-    if (!episodeId) return;
-    loadEpisode(episodeId).then(ep => setCurrentEpisode(ep)).catch(() => navigate('/'));
-    return () => setCurrentEpisode(null);
-  }, [episodeId]);
+    if (!episodeId) {
+      setCurrentEpisode(null);
+      setEpisodeLoadStatus('error');
+      setEpisodeLoadError({ kind: 'not_found', message: 'Missing episode id in route.' });
+      return undefined;
+    }
+
+    let cancelled = false;
+    setEpisodeLoadStatus('loading');
+    setEpisodeLoadError(null);
+
+    void loadEpisode(episodeId)
+      .then(ep => {
+        if (cancelled) return;
+        if (!ep) {
+          setCurrentEpisode(null);
+          setEpisodeLoadStatus('error');
+          setEpisodeLoadError({ kind: 'not_found', message: 'Episode not found' });
+          return;
+        }
+        setCurrentEpisode(ep);
+        setEpisodeLoadStatus('ready');
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : 'Unknown episode load failure';
+        setCurrentEpisode(null);
+        setEpisodeLoadStatus('error');
+        setEpisodeLoadError({
+          kind: isEpisodeNotFoundError(error) ? 'not_found' : 'load_failed',
+          message,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [episodeId, reloadVersion, setCurrentEpisode]);
 
   useEffect(() => {
     if (currentEpisode) {
@@ -230,7 +334,17 @@ function EpisodeWorkspace() {
     navigate(`/project/${currentEpisode?.projectId || ''}`);
   };
 
-  if (!currentEpisode) {
+  if (episodeLoadStatus === 'error' && episodeLoadError && !currentEpisode) {
+    return (
+      <EpisodeLoadErrorState
+        error={episodeLoadError}
+        onRetry={() => setReloadVersion(prev => prev + 1)}
+        onBack={projectId ? () => navigate(`/project/${projectId}`) : undefined}
+      />
+    );
+  }
+
+  if (episodeLoadStatus === 'loading' || !currentEpisode) {
     return <div className="h-screen flex items-center justify-center text-[var(--text-muted)]">加载中...</div>;
   }
 

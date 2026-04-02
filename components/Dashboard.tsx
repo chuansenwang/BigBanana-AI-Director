@@ -4,7 +4,7 @@ import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, 
 import { getAllSeriesProjects, createNewSeriesProject, saveSeriesProject, deleteSeriesProject, createNewSeries, saveSeries, createNewEpisode, saveEpisode, getAllAssetLibraryItems, deleteAssetFromLibrary, exportIndexedDBData, getAllBenchmarkVideos, saveBenchmarkVideo, deleteBenchmarkVideo } from '../services/storageService';
 import { useAlert } from './GlobalAlert';
 import { useTheme } from '../contexts/ThemeContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   useBackupTransfer,
   DEFAULT_BACKUP_TRANSFER_MESSAGES,
@@ -680,6 +680,24 @@ const MOCK_SLICE_TOTAL_COVERAGE_LABEL = formatMockSliceTimestamp(MOCK_SLICE_TOTA
 
 const DEFAULT_MOCK_SLICE_SHOT_ID = MOCK_SLICE_SHOTS[0]?.id ?? '';
 
+const getDashboardHomeSection = (searchParams: URLSearchParams): 'projects' | 'analysis' => (
+  searchParams.get('section') === 'analysis' ? 'analysis' : 'projects'
+);
+
+const getDashboardAnalysisSubView = (searchParams: URLSearchParams): 'benchmark' | 'overview' => (
+  searchParams.get('analysisView') === 'overview' ? 'overview' : 'benchmark'
+);
+
+const getDashboardBenchmarkId = (searchParams: URLSearchParams): string | null => {
+  const value = searchParams.get('benchmarkId');
+  return value && value.trim() ? value.trim() : null;
+};
+
+const getDashboardSliceShotId = (searchParams: URLSearchParams): string => {
+  const value = searchParams.get('sliceShotId');
+  return value && value.trim() ? value.trim() : '';
+};
+
 const getMockSliceFrameToneClasses = (tone: MockSliceFrameTone) => {
   switch (tone) {
     case 'warning':
@@ -708,9 +726,10 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const { showAlert } = useAlert();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState<SeriesProject[]>([]);
-  const [homeSection, setHomeSection] = useState<'projects' | 'analysis'>('projects');
-  const [analysisSubView, setAnalysisSubView] = useState<'benchmark' | 'overview'>('benchmark');
+  const [homeSection, setHomeSection] = useState<'projects' | 'analysis'>(() => getDashboardHomeSection(searchParams));
+  const [analysisSubView, setAnalysisSubView] = useState<'benchmark' | 'overview'>(() => getDashboardAnalysisSubView(searchParams));
   const [isLoading, setIsLoading] = useState(true);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [libraryItems, setLibraryItems] = useState<AssetLibraryItem[]>([]);
@@ -728,14 +747,72 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const [videoLink, setVideoLink] = useState('');
   const [isDeconstructing, setIsDeconstructing] = useState(false);
   const [benchmarkList, setBenchmarkList] = useState<BenchmarkVideo[]>([]);
-  const [currentBenchmarkId, setCurrentBenchmarkId] = useState<string | null>(null);
+  const [hasLoadedBenchmarks, setHasLoadedBenchmarks] = useState(false);
+  const [currentBenchmarkId, setCurrentBenchmarkId] = useState<string | null>(() => getDashboardBenchmarkId(searchParams));
   const [isEditingBenchmarkBreakdown, setIsEditingBenchmarkBreakdown] = useState(false);
   const [isBenchmarkBreakdownExpanded, setIsBenchmarkBreakdownExpanded] = useState(false);
+  const [isSliceResultsPreviewExpanded, setIsSliceResultsPreviewExpanded] = useState(false);
   const [benchmarkBreakdownDraft, setBenchmarkBreakdownDraft] = useState('');
   const [isSavingBenchmarkBreakdown, setIsSavingBenchmarkBreakdown] = useState(false);
-  const [selectedSliceShotId, setSelectedSliceShotId] = useState(DEFAULT_MOCK_SLICE_SHOT_ID);
+  const [selectedSliceShotId, setSelectedSliceShotId] = useState(() => getDashboardSliceShotId(searchParams));
   const [sliceFrameViewer, setSliceFrameViewer] = useState<SliceFrameViewerState | null>(null);
   const [activeBenchmarkDownloadArtifacts, setActiveBenchmarkDownloadArtifacts] = useState<Record<string, BenchmarkDownloadArtifact>>({});
+
+  useEffect(() => {
+    const nextHomeSection = getDashboardHomeSection(searchParams);
+    const nextAnalysisSubView = getDashboardAnalysisSubView(searchParams);
+    const nextBenchmarkId = getDashboardBenchmarkId(searchParams);
+    const nextSliceShotId = getDashboardSliceShotId(searchParams);
+
+    if (homeSection !== nextHomeSection) {
+      setHomeSection(nextHomeSection);
+    }
+    if (analysisSubView !== nextAnalysisSubView) {
+      setAnalysisSubView(nextAnalysisSubView);
+    }
+    if (currentBenchmarkId !== nextBenchmarkId) {
+      setCurrentBenchmarkId(nextBenchmarkId);
+    }
+    if (searchParams.has('sliceShotId')) {
+      if (selectedSliceShotId !== nextSliceShotId) {
+        setSelectedSliceShotId(nextSliceShotId);
+      }
+    } else if ((nextHomeSection !== 'analysis' || !nextBenchmarkId) && selectedSliceShotId) {
+      setSelectedSliceShotId('');
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    const nextSearchParams = new URLSearchParams(searchParams);
+
+    if (homeSection === 'analysis') {
+      nextSearchParams.set('section', 'analysis');
+      nextSearchParams.set('analysisView', analysisSubView);
+
+      if (currentBenchmarkId) {
+        nextSearchParams.set('benchmarkId', currentBenchmarkId);
+      } else {
+        nextSearchParams.delete('benchmarkId');
+      }
+
+      if (currentBenchmarkId && selectedSliceShotId) {
+        nextSearchParams.set('sliceShotId', selectedSliceShotId);
+      } else {
+        nextSearchParams.delete('sliceShotId');
+      }
+    } else {
+      nextSearchParams.delete('section');
+      nextSearchParams.delete('analysisView');
+      nextSearchParams.delete('benchmarkId');
+      nextSearchParams.delete('sliceShotId');
+    }
+
+    const currentQuery = searchParams.toString();
+    const nextQuery = nextSearchParams.toString();
+    if (currentQuery !== nextQuery) {
+      setSearchParams(nextSearchParams, { replace: true });
+    }
+  }, [homeSection, analysisSubView, currentBenchmarkId, selectedSliceShotId, searchParams, setSearchParams]);
 
   const loadBenchmarks = async () => {
     try {
@@ -743,6 +820,8 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       setBenchmarkList(list);
     } catch (e) {
       console.error('Failed to load benchmarks', e);
+    } finally {
+      setHasLoadedBenchmarks(true);
     }
   };
 
@@ -809,9 +888,11 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const benchmarkBreakdownDisplayText = getBenchmarkBreakdownDisplayText(currentBenchmark);
   const isBenchmarkBreakdownEditable = !!currentBenchmark && currentBenchmark.status !== 'analyzing';
   const availableSlicingShots = currentBenchmark ? buildBenchmarkSlicingShots(currentBenchmark) : [];
-  const currentSliceShots = currentBenchmark?.sliceArtifact?.manifest?.shots?.length
-    ? mapSliceArtifactToPreviewShots(currentBenchmark.sliceArtifact)
-    : MOCK_SLICE_SHOTS;
+  const currentSliceShots = currentBenchmark
+    ? currentBenchmark.sliceArtifact?.manifest?.shots?.length
+      ? mapSliceArtifactToPreviewShots(currentBenchmark.sliceArtifact)
+      : MOCK_SLICE_SHOTS
+    : [];
   const selectedSliceShot = currentSliceShots.find((shot) => shot.id === selectedSliceShotId) || currentSliceShots[0] || null;
   const isUsingRealSliceData = !!currentBenchmark?.sliceArtifact?.manifest?.shots?.length;
   const currentSliceArtifact = currentBenchmark?.sliceArtifact;
@@ -831,10 +912,23 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   }, [currentBenchmarkId, currentBenchmark?.lastModified, benchmarkBreakdownDisplayText]);
 
   useEffect(() => {
-    setSelectedSliceShotId('');
+    setIsSliceResultsPreviewExpanded(false);
   }, [currentBenchmarkId]);
 
   useEffect(() => {
+    if (!hasLoadedBenchmarks || !currentBenchmarkId || currentBenchmark) {
+      return;
+    }
+
+    setCurrentBenchmarkId(null);
+    setSelectedSliceShotId('');
+  }, [hasLoadedBenchmarks, currentBenchmarkId, currentBenchmark]);
+
+  useEffect(() => {
+    if (!currentBenchmark) {
+      return;
+    }
+
     if (!selectedSliceShotId && currentSliceShots[0]?.id) {
       setSelectedSliceShotId(currentSliceShots[0].id);
       return;
@@ -842,7 +936,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     if (selectedSliceShotId && !currentSliceShots.some((shot) => shot.id === selectedSliceShotId)) {
       setSelectedSliceShotId(currentSliceShots[0]?.id || '');
     }
-  }, [currentSliceShots, selectedSliceShotId]);
+  }, [currentBenchmark, currentSliceShots, selectedSliceShotId]);
 
   useEffect(() => {
     if (!sliceFrameViewer) {
@@ -1613,7 +1707,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                           <div className="flex items-center gap-3">
                             {currentBenchmarkId && (
                               <button
-                                onClick={() => { setCurrentBenchmarkId(null); setVideoLink(''); }}
+                                onClick={() => { setCurrentBenchmarkId(null); setSelectedSliceShotId(''); setVideoLink(''); }}
                                 className="p-1 hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
                                 title="返回历史库"
                               >
@@ -1676,7 +1770,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                   {benchmarkList.map(item => (
                                     <div 
                                       key={item.id} 
-                                      onClick={() => setCurrentBenchmarkId(item.id)}
+                                      onClick={() => { setCurrentBenchmarkId(item.id); setSelectedSliceShotId(''); }}
                                       className="group cursor-pointer border border-[var(--border-primary)] bg-[var(--bg-base)] hover:border-[var(--border-secondary)] p-4 rounded-lg flex flex-col gap-2 transition-colors relative"
                                     >
                                       <button 
@@ -1949,8 +2043,8 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                           )}
 
                           {currentBenchmarkId && currentBenchmark && selectedSliceShot && (
-                            <div className="mt-6 rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-5 md:p-6 space-y-5">
-                              <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                            <div className="mt-6 overflow-hidden rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)]">
+                              <div className={`flex flex-col gap-4 px-5 py-4 md:px-6 xl:flex-row xl:items-end xl:justify-between ${isSliceResultsPreviewExpanded ? 'border-b border-[var(--border-subtle)]' : ''}`}>
                                 <div className="space-y-2 max-w-3xl">
                                   <div className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.24em] text-[var(--text-muted)]">
                                     <LayoutPanelTop className="w-3.5 h-3.5" />
@@ -1965,178 +2059,193 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                     </p>
                                   </div>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[420px]">
-                                  {[
-                                    { label: isUsingRealSliceData ? '真实镜头' : 'Mock 镜头', value: `${currentSliceShots.length} 条` },
-                                    { label: '关键帧卡', value: `${sliceFrameCount} 张` },
-                                    { label: '覆盖时长', value: sliceCoverageLabel },
-                                    { label: '当前选择', value: `镜头 ${selectedSliceShot.indexLabel}` },
-                                  ].map((item) => (
-                                    <div key={item.label} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
-                                      <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--text-muted)]">{item.label}</div>
-                                      <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{item.value}</div>
-                                    </div>
-                                  ))}
+                                <div className="flex items-start gap-2 xl:items-end">
+                                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:min-w-[420px]">
+                                    {[
+                                      { label: isUsingRealSliceData ? '真实镜头' : 'Mock 镜头', value: `${currentSliceShots.length} 条` },
+                                      { label: '关键帧卡', value: `${sliceFrameCount} 张` },
+                                      { label: '覆盖时长', value: sliceCoverageLabel },
+                                      { label: '当前选择', value: `镜头 ${selectedSliceShot.indexLabel}` },
+                                    ].map((item) => (
+                                      <div key={item.label} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
+                                        <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--text-muted)]">{item.label}</div>
+                                        <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{item.value}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsSliceResultsPreviewExpanded((prev) => !prev)}
+                                    aria-label={isSliceResultsPreviewExpanded ? '收起拆片镜头预览面板' : '展开拆片镜头预览面板'}
+                                    title={isSliceResultsPreviewExpanded ? '收起' : '展开'}
+                                    className="inline-flex items-center justify-center rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] p-2 text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)]"
+                                  >
+                                    {isSliceResultsPreviewExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                  </button>
                                 </div>
                               </div>
 
-                              <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)] xl:items-start">
-                                <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4">
-                                  <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-                                    <div>
-                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头矩阵</div>
-                                      <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要精修的段落</div>
-                                    </div>
-                                    <div className="text-[11px] text-[var(--text-tertiary)] xl:max-w-xs">
-                                      {isUsingRealSliceData ? '当前列表来自真实切片 manifest；选中后，右侧会固定显示首中尾三帧、节奏摘要和元数据。' : '所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。'}
-                                    </div>
-                                  </div>
-
-                                  <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-                                    {currentSliceShots.map((shot) => {
-                                      const isActive = shot.id === selectedSliceShot.id;
-                                      return (
-                                        <button
-                                          key={shot.id}
-                                          type="button"
-                                          aria-pressed={isActive}
-                                          onClick={() => setSelectedSliceShotId(shot.id)}
-                                          className={`group rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]'}`}
-                                        >
-                                          <div className="flex items-center justify-between gap-3">
-                                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${isActive ? 'bg-[var(--accent)]/14 text-[var(--accent)]' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'}`}>
-                                              镜头 {shot.indexLabel}
-                                            </span>
-                                            <span className="text-[10px] font-mono text-[var(--text-muted)]">{shot.durationLabel}</span>
-                                          </div>
-                                          <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{shot.title}</div>
-                                          <div className="mt-2 text-[11px] leading-5 text-[var(--text-tertiary)]">{shot.beatSummary}</div>
-                                          <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{shot.timeRange}</div>
-                                        </button>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-
-                                <div className="self-start xl:sticky xl:top-6">
-                                  <div className="space-y-4 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
-                                    <div className="flex flex-col gap-2 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4">
-                                      <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                              {isSliceResultsPreviewExpanded && (
+                                <div className="space-y-5 p-5 md:p-6">
+                                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)] xl:items-start">
+                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4">
+                                      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                                         <div>
-                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">选中镜头详情</div>
-                                          <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedSliceShot.indexLabel} · {selectedSliceShot.title}</div>
-                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedSliceShot.beatSummary}</div>
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头矩阵</div>
+                                          <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要精修的段落</div>
                                         </div>
-                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceShot.timeRange}</div>
+                                        <div className="text-[11px] text-[var(--text-tertiary)] xl:max-w-xs">
+                                          {isUsingRealSliceData ? '当前列表来自真实切片 manifest；选中后，右侧会固定显示首中尾三帧、节奏摘要和元数据。' : '所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。'}
+                                        </div>
                                       </div>
-                                      <p className="text-[11px] leading-5 text-[var(--text-muted)]">
-                                        浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和后续操作会固定保留在右侧，方便持续对照。
-                                      </p>
+
+                                      <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                                        {currentSliceShots.map((shot) => {
+                                          const isActive = shot.id === selectedSliceShot.id;
+                                          return (
+                                            <button
+                                              key={shot.id}
+                                              type="button"
+                                              aria-pressed={isActive}
+                                              onClick={() => setSelectedSliceShotId(shot.id)}
+                                              className={`group rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]'}`}
+                                            >
+                                              <div className="flex items-center justify-between gap-3">
+                                                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${isActive ? 'bg-[var(--accent)]/14 text-[var(--accent)]' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'}`}>
+                                                  镜头 {shot.indexLabel}
+                                                </span>
+                                                <span className="text-[10px] font-mono text-[var(--text-muted)]">{shot.durationLabel}</span>
+                                              </div>
+                                              <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{shot.title}</div>
+                                              <div className="mt-2 text-[11px] leading-5 text-[var(--text-tertiary)]">{shot.beatSummary}</div>
+                                              <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{shot.timeRange}</div>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
                                     </div>
 
-                                    <div className="space-y-3">
-                                      {selectedSliceShot.frames.map((frame) => {
-                                        const toneClasses = getMockSliceFrameToneClasses(frame.tone);
-                                        return (
-                                          <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
-                                            <div className="flex items-center justify-between gap-3">
-                                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${toneClasses.badge}`}>
-                                                {frame.label}
-                                              </span>
-                                              <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
+                                    <div className="self-start xl:sticky xl:top-6">
+                                      <div className="space-y-4 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
+                                        <div className="flex flex-col gap-2 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4">
+                                          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                                            <div>
+                                              <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">选中镜头详情</div>
+                                              <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedSliceShot.indexLabel} · {selectedSliceShot.title}</div>
+                                              <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedSliceShot.beatSummary}</div>
                                             </div>
+                                            <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceShot.timeRange}</div>
+                                          </div>
+                                          <p className="text-[11px] leading-5 text-[var(--text-muted)]">
+                                            浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和后续操作会固定保留在右侧，方便持续对照。
+                                          </p>
+                                        </div>
 
-                                            {frame.imageUrl ? (
-                                              <button
-                                                type="button"
-                                                onClick={() => handleOpenSliceFrameViewer(frame, selectedSliceShot)}
-                                                className="group relative block w-full aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 text-left transition-colors hover:border-[var(--border-secondary)]"
-                                                aria-label={`查看${selectedSliceShot.title}${frame.label}大图`}
-                                              >
-                                                <img src={frame.imageUrl} alt={`${selectedSliceShot.title} ${frame.label}`} className="h-full w-full rounded-lg object-contain" />
-                                                <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between rounded-b-lg bg-[var(--bg-base)]/82 px-3 py-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                                                  <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-secondary)]">点击查看大图</span>
+                                        <div className="space-y-3">
+                                          {selectedSliceShot.frames.map((frame) => {
+                                            const toneClasses = getMockSliceFrameToneClasses(frame.tone);
+                                            return (
+                                              <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
+                                                <div className="flex items-center justify-between gap-3">
+                                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${toneClasses.badge}`}>
+                                                    {frame.label}
+                                                  </span>
                                                   <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
                                                 </div>
-                                              </button>
-                                            ) : (
-                                              <div className="relative aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[linear-gradient(135deg,var(--bg-hover)_0%,var(--bg-sunken)_100%)] px-4 py-4">
-                                                <div className={`absolute -right-8 top-5 h-24 w-24 rounded-full blur-2xl ${toneClasses.glow}`} />
-                                                <div className="absolute inset-x-4 top-4 flex items-start justify-between">
-                                                  <div className="h-10 w-16 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)]/60" />
-                                                  <div className="h-7 w-7 rounded-full border border-[var(--border-secondary)] bg-[var(--bg-primary)]/50" />
-                                                </div>
-                                                <div className="absolute inset-x-4 bottom-4 space-y-2">
-                                                  <div className={`h-1.5 w-16 rounded-full ${toneClasses.line}`} />
-                                                  <div className="h-1.5 w-24 rounded-full bg-[var(--border-secondary)]" />
-                                                  <div className="h-1.5 w-20 rounded-full bg-[var(--border-secondary)]/70" />
+
+                                                {frame.imageUrl ? (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleOpenSliceFrameViewer(frame, selectedSliceShot)}
+                                                    className="group relative block w-full aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 text-left transition-colors hover:border-[var(--border-secondary)]"
+                                                    aria-label={`查看${selectedSliceShot.title}${frame.label}大图`}
+                                                  >
+                                                    <img src={frame.imageUrl} alt={`${selectedSliceShot.title} ${frame.label}`} className="h-full w-full rounded-lg object-contain" />
+                                                    <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between rounded-b-lg bg-[var(--bg-base)]/82 px-3 py-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                                                      <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-secondary)]">点击查看大图</span>
+                                                      <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
+                                                    </div>
+                                                  </button>
+                                                ) : (
+                                                  <div className="relative aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[linear-gradient(135deg,var(--bg-hover)_0%,var(--bg-sunken)_100%)] px-4 py-4">
+                                                    <div className={`absolute -right-8 top-5 h-24 w-24 rounded-full blur-2xl ${toneClasses.glow}`} />
+                                                    <div className="absolute inset-x-4 top-4 flex items-start justify-between">
+                                                      <div className="h-10 w-16 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)]/60" />
+                                                      <div className="h-7 w-7 rounded-full border border-[var(--border-secondary)] bg-[var(--bg-primary)]/50" />
+                                                    </div>
+                                                    <div className="absolute inset-x-4 bottom-4 space-y-2">
+                                                      <div className={`h-1.5 w-16 rounded-full ${toneClasses.line}`} />
+                                                      <div className="h-1.5 w-24 rounded-full bg-[var(--border-secondary)]" />
+                                                      <div className="h-1.5 w-20 rounded-full bg-[var(--border-secondary)]/70" />
+                                                    </div>
+                                                  </div>
+                                                )}
+
+                                                <div>
+                                                  <div className="text-[11px] font-semibold text-[var(--text-primary)]">{frame.caption}</div>
+                                                  <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">用于预览该镜头在首帧 / 中段 / 尾帧上的信息密度和构图落点。</div>
                                                 </div>
                                               </div>
-                                            )}
+                                            );
+                                          })}
+                                        </div>
 
-                                            <div>
-                                              <div className="text-[11px] font-semibold text-[var(--text-primary)]">{frame.caption}</div>
-                                              <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">用于预览该镜头在首帧 / 中段 / 尾帧上的信息密度和构图落点。</div>
-                                            </div>
+                                        <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头元数据</div>
+                                          <div className="mt-4 space-y-3">
+                                            {[
+                                              { label: '镜头时长', value: selectedSliceShot.durationLabel },
+                                              { label: '转场方式', value: selectedSliceShot.transition },
+                                              { label: '运镜语言', value: selectedSliceShot.cameraLanguage },
+                                              { label: '情绪落点', value: selectedSliceShot.emotionAnchor },
+                                              { label: '声音设计', value: selectedSliceShot.soundDesign },
+                                              { label: '提示词聚焦', value: selectedSliceShot.promptFocus },
+                                            ].map((item) => (
+                                              <div key={item.label} className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{item.label}</div>
+                                                <div className="mt-1 text-[11px] leading-5 text-[var(--text-primary)]">{item.value}</div>
+                                              </div>
+                                            ))}
                                           </div>
-                                        );
-                                      })}
-                                    </div>
+                                        </div>
 
-                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
-                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头元数据</div>
-                                      <div className="mt-4 space-y-3">
-                                        {[
-                                          { label: '镜头时长', value: selectedSliceShot.durationLabel },
-                                          { label: '转场方式', value: selectedSliceShot.transition },
-                                          { label: '运镜语言', value: selectedSliceShot.cameraLanguage },
-                                          { label: '情绪落点', value: selectedSliceShot.emotionAnchor },
-                                          { label: '声音设计', value: selectedSliceShot.soundDesign },
-                                          { label: '提示词聚焦', value: selectedSliceShot.promptFocus },
-                                        ].map((item) => (
-                                          <div key={item.label} className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
-                                            <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{item.label}</div>
-                                            <div className="mt-1 text-[11px] leading-5 text-[var(--text-primary)]">{item.value}</div>
+                                        <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">后续操作</div>
+                                          <div className="mt-4 space-y-3">
+                                            <button
+                                              type="button"
+                                              disabled
+                                              className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-3 text-[11px] font-bold text-[var(--accent-text)] opacity-60"
+                                            >
+                                              <Wand2 className="w-3.5 h-3.5" />
+                                              生成镜头批注
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled
+                                              className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
+                                            >
+                                              <Archive className="w-3.5 h-3.5" />
+                                              导出三帧卡片
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled
+                                              className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
+                                            >
+                                              <ExternalLink className="w-3.5 h-3.5" />
+                                              同步到导演台
+                                            </button>
                                           </div>
-                                        ))}
+                                          <p className="mt-4 text-[11px] leading-5 text-[var(--text-muted)]">
+                                            当前这一组按钮主要用于承接后续镜头批注、三帧导出和同步导演台等动作；真实切片结果已经可以直接复用这套布局。
+                                          </p>
+                                        </div>
                                       </div>
-                                    </div>
-
-                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
-                                      <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">后续操作</div>
-                                      <div className="mt-4 space-y-3">
-                                        <button
-                                          type="button"
-                                          disabled
-                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-3 text-[11px] font-bold text-[var(--accent-text)] opacity-60"
-                                        >
-                                          <Wand2 className="w-3.5 h-3.5" />
-                                          生成镜头批注
-                                        </button>
-                                        <button
-                                          type="button"
-                                          disabled
-                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
-                                        >
-                                          <Archive className="w-3.5 h-3.5" />
-                                          导出三帧卡片
-                                        </button>
-                                        <button
-                                          type="button"
-                                          disabled
-                                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-4 py-3 text-[11px] font-bold text-[var(--text-primary)] opacity-70"
-                                        >
-                                          <ExternalLink className="w-3.5 h-3.5" />
-                                          同步到导演台
-                                        </button>
-                                      </div>
-                                      <p className="mt-4 text-[11px] leading-5 text-[var(--text-muted)]">
-                                        当前这一组按钮主要用于承接后续镜头批注、三帧导出和同步导演台等动作；真实切片结果已经可以直接复用这套布局。
-                                      </p>
                                     </div>
                                   </div>
                                 </div>
-                              </div>
+                              )}
                             </div>
                           )}
                         </div>
