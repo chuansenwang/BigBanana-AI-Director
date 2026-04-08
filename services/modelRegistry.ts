@@ -26,6 +26,7 @@ import { inferProviderProtocol } from './modelProtocolService';
 // localStorage 键名
 const STORAGE_KEY = 'bigbanana_model_registry';
 const API_KEY_STORAGE_KEY = 'antsk_api_key';
+const PROMPT_RECONSTRUCTION_MODEL_STORAGE_KEY = 'bigbanana_prompt_reconstruction_chat_model';
 
 // 规范化 URL（去尾部斜杠、转小写）用于去重
 const normalizeBaseUrl = (url: string): string => url.trim().replace(/\/+$/, '').toLowerCase();
@@ -550,6 +551,57 @@ export const getActiveModel = (type: ModelType): ModelDefinition | undefined => 
  */
 export const getActiveChatModel = (): ChatModelDefinition | undefined => {
   return getActiveModel('chat') as ChatModelDefinition | undefined;
+};
+
+export const getPromptReconstructionModelId = (): string | undefined => {
+  const modelId = String(localStorage.getItem(PROMPT_RECONSTRUCTION_MODEL_STORAGE_KEY) || '').trim();
+  if (!modelId) return undefined;
+  const model = getModelById(modelId);
+  if (!model || model.type !== 'chat' || !model.isEnabled) {
+    return undefined;
+  }
+  return model.id;
+};
+
+export const setPromptReconstructionModelId = (modelId?: string): boolean => {
+  const normalized = String(modelId || '').trim();
+  if (!normalized) {
+    localStorage.removeItem(PROMPT_RECONSTRUCTION_MODEL_STORAGE_KEY);
+    return true;
+  }
+
+  const model = getModelById(normalized);
+  if (!model || model.type !== 'chat' || !model.isEnabled) {
+    return false;
+  }
+
+  localStorage.setItem(PROMPT_RECONSTRUCTION_MODEL_STORAGE_KEY, model.id);
+  return true;
+};
+
+export const resolvePromptReconstructionModelId = (fallbackModelId?: string): string => {
+  const dedicatedModelId = getPromptReconstructionModelId();
+  if (dedicatedModelId) return dedicatedModelId;
+
+  const normalizedFallback = normalizeChatModelId(fallbackModelId);
+  if (normalizedFallback) {
+    const fallbackModel = getModelById(normalizedFallback);
+    if (fallbackModel?.type === 'chat' && fallbackModel.isEnabled) {
+      return fallbackModel.id;
+    }
+  }
+
+  const activeChatModel = getActiveChatModel();
+  if (activeChatModel?.isEnabled) {
+    return activeChatModel.id;
+  }
+
+  const firstEnabledChatModel = getChatModels().find((model) => model.isEnabled);
+  if (firstEnabledChatModel) {
+    return firstEnabledChatModel.id;
+  }
+
+  return DEFAULT_ACTIVE_MODELS.chat;
 };
 
 /**

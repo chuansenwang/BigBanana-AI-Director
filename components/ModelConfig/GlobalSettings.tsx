@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { Key, Loader2, CheckCircle, AlertCircle, ExternalLink, Gift, Sparkles, Server, Pencil, Check, X, Cpu, HardDrive } from 'lucide-react';
 import { ModelProvider, ProviderAuthHeaderType, ProviderAuthMode, ProviderConnectionMode, ProviderProtocol } from '../../types/model';
-import { getGlobalApiKey, setGlobalApiKey, getProviders, addProvider, updateProvider } from '../../services/modelRegistry';
+import { getGlobalApiKey, setGlobalApiKey, getProviders, addProvider, updateProvider, getChatModels, getPromptReconstructionModelId, resolvePromptReconstructionModelId, setPromptReconstructionModelId } from '../../services/modelRegistry';
 import { verifyApiKey } from '../../services/modelService';
 import { USER_MANUAL_URL } from '../../constants/links';
 import { CUSTOM_PROVIDER_PROTOCOLS } from '../../services/modelProtocolService';
@@ -44,6 +44,8 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
   const [localAnalysisMessage, setLocalAnalysisMessage] = useState('');
   const [artifactStorageConfig, setArtifactStorageConfig] = useState<ArtifactStorageUserConfig>(() => loadArtifactStorageUserConfig());
   const [artifactStorageMessage, setArtifactStorageMessage] = useState('');
+  const [promptReconstructionModelId, setPromptReconstructionModelIdState] = useState(() => getPromptReconstructionModelId() || '__follow_chat__');
+  const [promptReconstructionMessage, setPromptReconstructionMessage] = useState('');
   const [localAnalysisHealth, setLocalAnalysisHealth] = useState<LocalAnalysisHealthData | null>(null);
   const [localAnalysisHealthError, setLocalAnalysisHealthError] = useState('');
   const [isCheckingLocalAnalysisHealth, setIsCheckingLocalAnalysisHealth] = useState(false);
@@ -54,11 +56,15 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     setProviders(getProviders());
     setLocalAnalysisConfig(loadLocalAnalysisUserConfig());
     setArtifactStorageConfig(loadArtifactStorageUserConfig());
+    setPromptReconstructionModelIdState(getPromptReconstructionModelId() || '__follow_chat__');
     if (currentKey) {
       setVerifyStatus('success');
       setVerifyMessage('API Key 已配置');
     }
   }, []);
+
+  const availablePromptReconstructionModels = getChatModels().filter((model) => model.isEnabled);
+  const effectivePromptReconstructionModelName = availablePromptReconstructionModels.find((model) => model.id === resolvePromptReconstructionModelId())?.name || resolvePromptReconstructionModelId();
 
   const updateLocalAnalysisField = (field: keyof LocalAnalysisUserConfig, value: string) => {
     setLocalAnalysisConfig((prev) => ({ ...prev, [field]: value }));
@@ -112,6 +118,20 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
     const defaults = loadArtifactStorageUserConfig();
     setArtifactStorageConfig(defaults);
     setArtifactStorageMessage('已恢复默认制品存储配置。后续下载与切片流程会重新使用默认目录规则。');
+    onRefresh();
+  };
+
+  const handleSavePromptReconstructionModel = () => {
+    const nextModelId = promptReconstructionModelId === '__follow_chat__' ? undefined : promptReconstructionModelId;
+    const success = setPromptReconstructionModelId(nextModelId);
+    if (!success) {
+      setPromptReconstructionMessage('保存失败：请选择一个已启用的对话模型。');
+      return;
+    }
+    const effectiveModelName = availablePromptReconstructionModels.find((model) => model.id === resolvePromptReconstructionModelId(nextModelId))?.name || resolvePromptReconstructionModelId(nextModelId);
+    setPromptReconstructionMessage(nextModelId
+      ? `图片反推将优先使用 ${effectiveModelName}。`
+      : `图片反推将跟随当前对话模型（当前解析为 ${effectiveModelName}）。`);
     onRefresh();
   };
 
@@ -412,6 +432,54 @@ const GlobalSettings: React.FC<GlobalSettingsProps> = ({ onRefresh }) => {
           <li>支持添加自定义模型，使用其他 API 服务</li>
           <li>所有配置仅保存在本地浏览器，不会上传到服务器</li>
         </ul>
+      </div>
+
+      <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)]/40 p-5">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--accent-bg)] border border-[var(--accent-border)]">
+            <Sparkles className="w-5 h-5 text-[var(--accent-text)]" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-bold text-[var(--text-primary)]">图片反推模型</h3>
+            <p className="mt-2 text-xs leading-6 text-[var(--text-tertiary)]">
+              这里单独指定“图片反推”使用的多模态对话模型。未单独配置时，会自动跟随当前对话模型。
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+          <label className="space-y-2">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-tertiary)]">专用模型</span>
+            <select
+              value={promptReconstructionModelId}
+              onChange={(e) => {
+                setPromptReconstructionModelIdState(e.target.value);
+                setPromptReconstructionMessage('');
+              }}
+              className="w-full bg-[var(--bg-surface)] border border-[var(--border-primary)] text-[var(--text-primary)] px-4 py-3 text-sm rounded-lg focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent-hover)] transition-all"
+            >
+              <option value="__follow_chat__">跟随当前对话模型（当前：{effectivePromptReconstructionModelName}）</option>
+              {availablePromptReconstructionModels.map((model) => (
+                <option key={model.id} value={model.id}>{model.name}</option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            onClick={handleSavePromptReconstructionModel}
+            className="px-4 py-3 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] text-xs font-bold uppercase tracking-wider transition-colors rounded-lg border border-[var(--border-primary)]"
+          >
+            保存反推配置
+          </button>
+        </div>
+
+        <p className="mt-3 text-[10px] leading-6 text-[var(--text-muted)]">
+          推荐选择支持图片输入的多模态对话模型。该配置只影响“图片反推”按钮，不影响剧本解析、分镜生成等其他文本任务。
+        </p>
+
+        {promptReconstructionMessage && (
+          <div className="mt-3 text-[10px] text-[var(--success-text)]">{promptReconstructionMessage}</div>
+        )}
       </div>
 
       <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-elevated)]/40 p-5">

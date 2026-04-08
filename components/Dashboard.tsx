@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Trash2, Loader2, Folder, ChevronDown, ChevronRight, Calendar, AlertTriangle, X, Cpu, Archive, Search, SearchCheck, Sparkles, LayoutPanelTop, Users, MapPin, Package, Database, Settings, Sun, Moon, Film, ExternalLink, User, Link as LinkIcon, Wand2 } from 'lucide-react';
-import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo, BenchmarkDownloadArtifact, BenchmarkSliceArtifact, BenchmarkSliceManifestShot } from '../types';
-import { getAllSeriesProjects, createNewSeriesProject, saveSeriesProject, deleteSeriesProject, createNewSeries, saveSeries, createNewEpisode, saveEpisode, getAllAssetLibraryItems, deleteAssetFromLibrary, exportIndexedDBData, getAllBenchmarkVideos, saveBenchmarkVideo, deleteBenchmarkVideo } from '../services/storageService';
+import { SeriesProject, AssetLibraryItem, Character, Scene, Prop, ProjectState, BenchmarkVideo, BenchmarkDownloadArtifact, BenchmarkSliceArtifact, BenchmarkSliceManifestShot, BenchmarkSlicePromptReconstruction } from '../types';
+import { getAllSeriesProjects, createNewSeriesProject, saveSeriesProject, deleteSeriesProject, createNewSeries, saveSeries, createNewEpisode, saveEpisode, getAllAssetLibraryItems, saveAssetToLibrary, deleteAssetFromLibrary, exportIndexedDBData, getAllBenchmarkVideos, saveBenchmarkVideo, deleteBenchmarkVideo, convertImageToBase64 } from '../services/storageService';
 import { useAlert } from './GlobalAlert';
 import { useTheme } from '../contexts/ThemeContext';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useResolvedVideoUrl } from '../hooks/useResolvedVideoUrl';
+import AssetLibraryEditorCard, { LibraryAsset } from './CharacterLibrary/AssetLibraryEditorCard';
 import {
   useBackupTransfer,
   DEFAULT_BACKUP_TRANSFER_MESSAGES,
@@ -14,13 +16,16 @@ import { DIRECTOR_HUB_URL } from '../constants/links';
 import { analyzeYouTubeBenchmark, downloadYouTubeBenchmarkVideo, fetchYouTubeBenchmarkIntake } from '../services/youtubeBenchmarkService';
 import { importBenchmarkToProject } from '../services/benchmarkImportService';
 import { loadArtifactStorageUserConfig } from '../services/artifactStorageConfigService';
-import { buildBenchmarkSlicingShots, buildStoryboardSlicingAssetUrl, runBenchmarkSlicing } from '../services/storyboardSlicingService';
+import { buildBenchmarkSlicingShots, buildStoryboardSlicingAssetUrl, mergeStoryboardSliceClips, resolveBenchmarkSliceMiddleFrameCandidates, resolveBenchmarkSliceRepresentativeMiddleFrame, runBenchmarkPromptReconstruction, runBenchmarkSlicing } from '../services/storyboardSlicingService';
+import { createLibraryItemFromCharacter } from '../services/assetLibraryService';
 
 interface Props {
   onOpenProject: (project: ProjectState) => void;
   onShowOnboarding?: () => void;
   onShowModelConfig?: () => void;
 }
+
+type DashboardHomeSection = 'projects' | 'characters' | 'analysis';
 
 const hasBenchmarkText = (value?: string | number | null): boolean => {
   if (value === null || value === undefined) return false;
@@ -62,6 +67,22 @@ const formatEtaLabel = (seconds?: number): string | null => {
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
   return `${mins} 分 ${secs.toString().padStart(2, '0')} 秒`;
+};
+
+const STALE_SLICE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
+
+const formatElapsedSince = (timestamp?: number): string | null => {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return null;
+  const elapsedMs = Date.now() - timestamp;
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return null;
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${seconds.toString().padStart(2, '0')} 秒`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours} 小时 ${remainingMinutes.toString().padStart(2, '0')} 分`;
 };
 
 const mergeDownloadArtifact = (
@@ -247,6 +268,8 @@ interface MockSliceFrame {
   caption: string;
   tone: MockSliceFrameTone;
   imageUrl?: string;
+  fallbackImageUrls?: string[];
+  promptText?: string;
 }
 
 interface MockSliceShot {
@@ -259,11 +282,16 @@ interface MockSliceShot {
   timeRange: string;
   durationLabel: string;
   beatSummary: string;
+  scene?: string;
+  dialogue?: string;
   transition: string;
   cameraLanguage: string;
   emotionAnchor: string;
   soundDesign: string;
   promptFocus: string;
+  clipPath?: string;
+  videoUrl?: string;
+  reconstruction?: BenchmarkSlicePromptReconstruction;
   frames: MockSliceFrame[];
 }
 
@@ -273,6 +301,722 @@ interface SliceFrameViewerState {
   frameLabel: string;
   timecode: string;
 }
+
+interface SliceParagraphPreview {
+  id: string;
+  label: string;
+  firstShotId: string;
+  shotIds: string[];
+  shotCount: number;
+  shotRangeLabel: string;
+  timeRangeLabel: string;
+  totalDurationLabel: string;
+  primaryScene: string;
+  summary: string;
+  dialogueExcerpt?: string;
+}
+
+interface SliceVideoEvidence {
+  id: string;
+  label: string;
+  title: string;
+  timeRange: string;
+  durationLabel: string;
+  videoUrl?: string;
+  posterUrl?: string;
+}
+
+interface SliceFilmstripFrame {
+  id: string;
+  shotLabel: string;
+  title: string;
+  timecode: string;
+  imageUrl: string;
+  fallbackImageUrls: string[];
+}
+
+interface MergedParagraphVideoState {
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  videoUrl?: string;
+  errorMessage?: string;
+}
+
+interface SliceDetailModel {
+  id: string;
+  kind: 'shot' | 'merged';
+  label: string;
+  title: string;
+  summary: string;
+  timeRange: string;
+  durationLabel: string;
+  shotCount: number;
+  scene: string;
+  dialogue: string;
+  cameraLanguage: string;
+  emotionAnchor: string;
+  soundDesign: string;
+  promptFocus: string;
+  frames: MockSliceFrame[];
+  filmstripFrames: SliceFilmstripFrame[];
+  videoUrl?: string;
+  videoEvidence: SliceVideoEvidence[];
+  mergedClipPaths: string[];
+  reconstructionStatus?: BenchmarkSlicePromptReconstruction['status'];
+  reconstructionConfidence?: string | null;
+  reconstructionCombinedPrompt?: string;
+  reconstructionTransitionSummary?: string;
+  reconstructionNegativePrompt?: string;
+  continuityNotes: string[];
+  missingDetails: string[];
+  reconstructionWarnings: string[];
+}
+
+type AdaptationDocumentBlockType = 'text' | 'image';
+
+interface AdaptationTextBlock {
+  id: string;
+  type: 'text';
+  content: string;
+}
+
+interface AdaptationImageBlock {
+  id: string;
+  type: 'image';
+  imageUrl: string;
+  fallbackImageUrls?: string[];
+  shotLabel: string;
+  shotTitle?: string;
+  frameLabel: string;
+  timecode: string;
+  caption?: string;
+  source: 'slice-frame' | 'filmstrip';
+}
+
+type AdaptationDocumentBlock = AdaptationTextBlock | AdaptationImageBlock;
+
+interface AdaptationDocument {
+  version: 1;
+  blocks: AdaptationDocumentBlock[];
+}
+
+interface AdaptationImageInsertPayload {
+  imageUrl: string;
+  fallbackImageUrls?: string[];
+  shotLabel: string;
+  shotTitle?: string;
+  frameLabel: string;
+  timecode: string;
+  caption?: string;
+  source: 'slice-frame' | 'filmstrip';
+}
+
+const ADAPTATION_DOCUMENT_PREFIX = '__BIGBANANA_ADAPTATION_DOC__::';
+
+const createAdaptationBlockId = (kind: AdaptationDocumentBlockType): string => (
+  `adapt_${kind}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+);
+
+const createAdaptationTextBlock = (content = ''): AdaptationTextBlock => ({
+  id: createAdaptationBlockId('text'),
+  type: 'text',
+  content,
+});
+
+const createEmptyAdaptationDocument = (): AdaptationDocument => ({
+  version: 1,
+  blocks: [createAdaptationTextBlock('')],
+});
+
+const normalizeAdaptationDocumentBlocks = (blocks: AdaptationDocumentBlock[]): AdaptationDocumentBlock[] => {
+  const normalizedBlocks: AdaptationDocumentBlock[] = [];
+
+  blocks.forEach((block) => {
+    if (block.type === 'text') {
+      const nextContent = typeof block.content === 'string' ? block.content : '';
+      const previousBlock = normalizedBlocks[normalizedBlocks.length - 1];
+      if (previousBlock?.type === 'text') {
+        previousBlock.content = previousBlock.content && nextContent
+          ? `${previousBlock.content}\n\n${nextContent}`
+          : `${previousBlock.content}${nextContent}`;
+        return;
+      }
+
+      normalizedBlocks.push({
+        id: block.id || createAdaptationBlockId('text'),
+        type: 'text',
+        content: nextContent,
+      });
+      return;
+    }
+
+    const trimmedImageUrl = String(block.imageUrl || '').trim();
+    if (!trimmedImageUrl) {
+      return;
+    }
+
+    normalizedBlocks.push({
+      ...block,
+      id: block.id || createAdaptationBlockId('image'),
+      imageUrl: trimmedImageUrl,
+      fallbackImageUrls: Array.isArray(block.fallbackImageUrls)
+        ? block.fallbackImageUrls.map((value) => String(value || '').trim()).filter(Boolean)
+        : undefined,
+      shotLabel: String(block.shotLabel || '未命名镜头').trim() || '未命名镜头',
+      shotTitle: typeof block.shotTitle === 'string' && block.shotTitle.trim() ? block.shotTitle.trim() : undefined,
+      frameLabel: String(block.frameLabel || '关键帧').trim() || '关键帧',
+      timecode: String(block.timecode || '-').trim() || '-',
+      caption: typeof block.caption === 'string' && block.caption.trim() ? block.caption.trim() : undefined,
+    });
+  });
+
+  return normalizedBlocks.length > 0 ? normalizedBlocks : [createAdaptationTextBlock('')];
+};
+
+const coerceAdaptationDocumentBlock = (input: unknown): AdaptationDocumentBlock | null => {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const record = input as Record<string, unknown>;
+  const type = record.type;
+  if (type === 'image') {
+    const imageUrl = String(record.imageUrl || '').trim();
+    if (!imageUrl) {
+      return null;
+    }
+
+    return {
+      id: typeof record.id === 'string' && record.id.trim() ? record.id.trim() : createAdaptationBlockId('image'),
+      type: 'image',
+      imageUrl,
+      fallbackImageUrls: Array.isArray(record.fallbackImageUrls)
+        ? record.fallbackImageUrls.map((value) => String(value || '').trim()).filter(Boolean)
+        : undefined,
+      shotLabel: typeof record.shotLabel === 'string' && record.shotLabel.trim() ? record.shotLabel.trim() : '未命名镜头',
+      shotTitle: typeof record.shotTitle === 'string' && record.shotTitle.trim() ? record.shotTitle.trim() : undefined,
+      frameLabel: typeof record.frameLabel === 'string' && record.frameLabel.trim() ? record.frameLabel.trim() : '关键帧',
+      timecode: typeof record.timecode === 'string' && record.timecode.trim() ? record.timecode.trim() : '-',
+      caption: typeof record.caption === 'string' && record.caption.trim() ? record.caption.trim() : undefined,
+      source: record.source === 'filmstrip' ? 'filmstrip' : 'slice-frame',
+    };
+  }
+
+  if (type === 'text') {
+    return {
+      id: typeof record.id === 'string' && record.id.trim() ? record.id.trim() : createAdaptationBlockId('text'),
+      type: 'text',
+      content: typeof record.content === 'string' ? record.content : '',
+    };
+  }
+
+  return null;
+};
+
+const parseStoredAdaptationDocument = (rawValue?: string | null): AdaptationDocument => {
+  const source = typeof rawValue === 'string' ? rawValue : '';
+  if (!source.trim()) {
+    return createEmptyAdaptationDocument();
+  }
+
+  if (!source.startsWith(ADAPTATION_DOCUMENT_PREFIX)) {
+    return {
+      version: 1,
+      blocks: [createAdaptationTextBlock(source)],
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(source.slice(ADAPTATION_DOCUMENT_PREFIX.length)) as { version?: number; blocks?: unknown[] };
+    const blocks = Array.isArray(parsed.blocks)
+      ? parsed.blocks.map((block) => coerceAdaptationDocumentBlock(block)).filter((block): block is AdaptationDocumentBlock => block !== null)
+      : [];
+
+    return {
+      version: 1,
+      blocks: normalizeAdaptationDocumentBlocks(blocks),
+    };
+  } catch {
+    return {
+      version: 1,
+      blocks: [createAdaptationTextBlock(source)],
+    };
+  }
+};
+
+const getAdaptationDocumentPlainText = (document: AdaptationDocument): string => (
+  normalizeAdaptationDocumentBlocks(document.blocks)
+    .filter((block): block is AdaptationTextBlock => block.type === 'text')
+    .map((block) => block.content)
+    .join('\n\n')
+);
+
+const countAdaptationImageBlocks = (document: AdaptationDocument): number => (
+  normalizeAdaptationDocumentBlocks(document.blocks).filter((block) => block.type === 'image').length
+);
+
+const hasAdaptationDocumentContent = (document: AdaptationDocument): boolean => (
+  normalizeAdaptationDocumentBlocks(document.blocks).some((block) => block.type === 'image' || block.content.trim().length > 0)
+);
+
+const serializeAdaptationDocument = (document: AdaptationDocument): string | undefined => {
+  const normalizedBlocks = normalizeAdaptationDocumentBlocks(document.blocks);
+  const hasImageBlocks = normalizedBlocks.some((block) => block.type === 'image');
+
+  if (!hasImageBlocks) {
+    const plainText = normalizedBlocks
+      .filter((block): block is AdaptationTextBlock => block.type === 'text')
+      .map((block) => block.content)
+      .join('\n\n')
+      .trim();
+    return plainText || undefined;
+  }
+
+  return `${ADAPTATION_DOCUMENT_PREFIX}${JSON.stringify({
+    version: 1,
+    blocks: normalizedBlocks,
+  })}`;
+};
+
+const updateAdaptationTextBlock = (
+  document: AdaptationDocument,
+  blockId: string,
+  nextContent: string,
+): AdaptationDocument => ({
+  version: 1,
+  blocks: normalizeAdaptationDocumentBlocks(document.blocks.map((block) => (
+    block.type === 'text' && block.id === blockId
+      ? { ...block, content: nextContent }
+      : block
+  ))),
+});
+
+const removeAdaptationBlock = (document: AdaptationDocument, blockId: string): AdaptationDocument => ({
+  version: 1,
+  blocks: normalizeAdaptationDocumentBlocks(document.blocks.filter((block) => block.id !== blockId)),
+});
+
+const appendAdaptationImageBlock = (
+  document: AdaptationDocument,
+  payload: AdaptationImageInsertPayload,
+): { document: AdaptationDocument; focusBlockId: string } => {
+  const normalizedBlocks = normalizeAdaptationDocumentBlocks(document.blocks);
+  const lastBlock = normalizedBlocks[normalizedBlocks.length - 1];
+  const trailingEditableTextBlock = lastBlock?.type === 'text' && !lastBlock.content.trim()
+    ? lastBlock
+    : createAdaptationTextBlock('');
+  const baseBlocks = lastBlock?.id === trailingEditableTextBlock.id
+    ? normalizedBlocks.slice(0, -1)
+    : normalizedBlocks;
+
+  const imageBlock: AdaptationImageBlock = {
+    id: createAdaptationBlockId('image'),
+    type: 'image',
+    imageUrl: payload.imageUrl,
+    fallbackImageUrls: payload.fallbackImageUrls,
+    shotLabel: payload.shotLabel,
+    shotTitle: payload.shotTitle,
+    frameLabel: payload.frameLabel,
+    timecode: payload.timecode,
+    caption: payload.caption,
+    source: payload.source,
+  };
+
+  return {
+    document: {
+      version: 1,
+      blocks: [...baseBlocks, imageBlock, trailingEditableTextBlock],
+    },
+    focusBlockId: trailingEditableTextBlock.id,
+  };
+};
+
+const SLICE_PARAGRAPH_MAX_SHOTS = 4;
+const SLICE_PARAGRAPH_MAX_DURATION_SECONDS = 18;
+const SLICE_PARAGRAPH_MAX_GAP_SECONDS = 1.25;
+const SLICE_PARAGRAPH_RESET_HINT_PATTERN = /(黑场|淡入|淡出|闪回|回忆|字幕|章节|空镜|建立镜|场景切换|时间跳|新场景|镜头重置|切回现实)/i;
+const SLICE_EMPTY_DIALOGUE_PATTERN = /^[（(]?(无|none|n\/a|暂无|空)[）)]?$/i;
+
+const hasUsableSliceMetaText = (value?: string | null): boolean => hasMeaningfulSliceText(value) && value.trim() !== '-';
+
+const hasUsableSliceDialogueText = (value?: string | null): boolean => {
+  if (!hasMeaningfulSliceText(value)) return false;
+  const normalized = value.trim();
+  return normalized !== '-' && !SLICE_EMPTY_DIALOGUE_PATTERN.test(normalized);
+};
+
+const normalizeSliceGroupingToken = (value?: string | null): string => (
+  hasUsableSliceMetaText(value) ? value.trim().toLowerCase() : ''
+);
+
+const truncateSliceParagraphText = (value: string, maxLength: number): string => (
+  value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
+);
+
+const getSliceShotStartLabel = (shot: MockSliceShot): string => (
+  shot.timeRange.split(' - ')[0]?.trim() || formatMockSliceTimecode(shot.startSecond)
+);
+
+const getSliceShotEndLabel = (shot: MockSliceShot): string => {
+  const timeRangeParts = shot.timeRange.split(' - ');
+  return timeRangeParts[timeRangeParts.length - 1]?.trim() || formatMockSliceTimecode(shot.endSecond);
+};
+
+const getSliceParagraphPrimaryScene = (shots: MockSliceShot[]): string => {
+  const sceneCounts = new Map<string, number>();
+  shots.forEach((shot) => {
+    if (!hasUsableSliceMetaText(shot.scene)) {
+      return;
+    }
+    const normalizedScene = shot.scene!.trim();
+    sceneCounts.set(normalizedScene, (sceneCounts.get(normalizedScene) || 0) + 1);
+  });
+
+  const primarySceneEntry = Array.from(sceneCounts.entries())
+    .sort((left, right) => right[1] - left[1])[0];
+  return primarySceneEntry?.[0] || '未标注场景';
+};
+
+const getSliceParagraphSummary = (shots: MockSliceShot[]): string => {
+  const candidates = Array.from(new Set(
+    shots
+      .map((shot) => shot.beatSummary?.trim())
+      .filter((value): value is string => hasUsableSliceMetaText(value)),
+  ));
+
+  if (candidates.length === 0) {
+    const fallbackTitles = Array.from(new Set(
+      shots
+        .map((shot) => shot.title?.trim())
+        .filter((value): value is string => hasUsableSliceMetaText(value)),
+    ));
+    return truncateSliceParagraphText(fallbackTitles.slice(0, 2).join(' → ') || '当前段落可继续进入首镜头做精修检查。', 78);
+  }
+
+  return truncateSliceParagraphText(candidates.slice(0, 2).join(' → '), 78);
+};
+
+const getSliceParagraphDialogueExcerpt = (shots: MockSliceShot[]): string | undefined => {
+  const dialogue = shots
+    .map((shot) => shot.dialogue?.trim())
+    .filter((value): value is string => hasUsableSliceDialogueText(value))
+    .slice(0, 2)
+    .join(' / ');
+  return dialogue ? truncateSliceParagraphText(dialogue, 72) : undefined;
+};
+
+const formatSliceDialogueAggregate = (
+  values: Array<string | null | undefined>,
+  options: {
+    fallback?: string;
+    maxItems?: number;
+    maxLength?: number;
+    separator?: string;
+  } = {},
+): string => {
+  const orderedValues = values
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter((value) => hasUsableSliceDialogueText(value));
+
+  if (orderedValues.length === 0) {
+    return options.fallback ?? '当前合并段落暂无对白内容。';
+  }
+
+  return truncateSliceParagraphText(
+    orderedValues.slice(0, options.maxItems ?? orderedValues.length).join(options.separator ?? ' / '),
+    options.maxLength ?? 156,
+  );
+};
+
+const collectSliceMetaTexts = (
+  values: Array<string | null | undefined>,
+  options: { allowDash?: boolean } = {},
+): string[] => Array.from(new Set(
+  values
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter((value) => value.length > 0 && (options.allowDash || value !== '-')),
+));
+
+const formatSliceMetaAggregate = (
+  values: Array<string | null | undefined>,
+  options: {
+    allowDash?: boolean;
+    fallback?: string;
+    maxItems?: number;
+    maxLength?: number;
+    separator?: string;
+  } = {},
+): string => {
+  const uniqueValues = collectSliceMetaTexts(values, { allowDash: options.allowDash });
+  if (uniqueValues.length === 0) {
+    return options.fallback ?? '-';
+  }
+
+  return truncateSliceParagraphText(
+    uniqueValues.slice(0, options.maxItems ?? uniqueValues.length).join(options.separator ?? ' · '),
+    options.maxLength ?? 96,
+  );
+};
+
+const mergeSliceReconstructionStatus = (
+  reconstructions: BenchmarkSlicePromptReconstruction[],
+): BenchmarkSlicePromptReconstruction['status'] | undefined => {
+  const statuses = reconstructions
+    .map((item) => item.status)
+    .filter((status): status is NonNullable<BenchmarkSlicePromptReconstruction['status']> => !!status);
+
+  if (statuses.length === 0) return undefined;
+  if (statuses.every((status) => status === 'ok')) return 'ok';
+  if (statuses.every((status) => status === 'skipped')) return 'skipped';
+  if (statuses.every((status) => status === 'failed')) return 'failed';
+  if (statuses.every((status) => status === 'pending')) return 'pending';
+  if (statuses.some((status) => status === 'ok' || status === 'partial')) return 'partial';
+  if (statuses.some((status) => status === 'pending')) return 'pending';
+  return statuses[0];
+};
+
+const createMergedSliceFrame = (
+  paragraphId: string,
+  label: MockSliceFrameLabel,
+  baseFrame: MockSliceFrame | undefined,
+  fallbackTimecode: string,
+  fallbackCaption: string,
+): MockSliceFrame => ({
+  id: `${paragraphId}-${label}`,
+  label,
+  timecode: baseFrame?.timecode || fallbackTimecode,
+  caption: truncateSliceParagraphText(baseFrame?.caption || fallbackCaption, 92),
+  tone: baseFrame?.tone || (label === '首帧' ? 'warning' : label === '尾帧' ? 'success' : 'accent'),
+  imageUrl: baseFrame?.imageUrl,
+  fallbackImageUrls: baseFrame?.fallbackImageUrls,
+  promptText: baseFrame?.promptText,
+});
+
+const buildMergedSliceFrames = (paragraphId: string, paragraphShots: MockSliceShot[]): MockSliceFrame[] => {
+  const firstShot = paragraphShots[0];
+  const middleShot = paragraphShots[Math.floor((paragraphShots.length - 1) / 2)] || firstShot;
+  const lastShot = paragraphShots[paragraphShots.length - 1] || firstShot;
+  if (!firstShot || !middleShot || !lastShot) {
+    return [];
+  }
+
+  const firstFrame = firstShot.frames.find((frame) => frame.label === '首帧') || firstShot.frames[0];
+  const middleFrame = middleShot.frames.find((frame) => frame.label === '中段') || middleShot.frames[1] || middleShot.frames[0];
+  const lastFrame = lastShot.frames.find((frame) => frame.label === '尾帧') || lastShot.frames[lastShot.frames.length - 1];
+
+  return [
+    createMergedSliceFrame(
+      paragraphId,
+      '首帧',
+      firstFrame,
+      formatMockSliceTimecode(firstShot.startSecond),
+      `段首参考（镜头 ${firstShot.indexLabel}）· ${firstShot.beatSummary}`,
+    ),
+    createMergedSliceFrame(
+      paragraphId,
+      '中段',
+      middleFrame,
+      formatMockSliceTimecode((firstShot.startSecond + lastShot.endSecond) / 2),
+      `段中参考（镜头 ${middleShot.indexLabel}）· ${middleShot.beatSummary}`,
+    ),
+    createMergedSliceFrame(
+      paragraphId,
+      '尾帧',
+      lastFrame,
+      formatMockSliceTimecode(lastShot.endSecond),
+      `段尾参考（镜头 ${lastShot.indexLabel}）· ${lastShot.beatSummary}`,
+    ),
+  ];
+};
+
+const buildMergedSliceFilmstripFrames = (paragraphId: string, paragraphShots: MockSliceShot[]): SliceFilmstripFrame[] => (
+  paragraphShots
+    .map((shot) => {
+      const middleFrame = shot.frames.find((frame) => frame.label === '中段') || shot.frames[1] || shot.frames[0];
+      if (!middleFrame?.imageUrl) {
+        return null;
+      }
+
+      return {
+        id: `${paragraphId}-${shot.id}-filmstrip`,
+        shotLabel: `镜头 ${shot.indexLabel}`,
+        title: shot.title,
+        timecode: middleFrame.timecode,
+        imageUrl: middleFrame.imageUrl,
+        fallbackImageUrls: middleFrame.fallbackImageUrls || [],
+      };
+    })
+    .filter((frame): frame is SliceFilmstripFrame => frame !== null)
+);
+
+const buildSliceShotDetail = (shot: MockSliceShot): SliceDetailModel => ({
+  id: shot.id,
+  kind: 'shot',
+  label: `镜头 ${shot.indexLabel}`,
+  title: shot.title,
+  summary: shot.beatSummary,
+  timeRange: shot.timeRange,
+  durationLabel: shot.durationLabel,
+  shotCount: 1,
+  scene: shot.scene || '-',
+  dialogue: shot.dialogue && shot.dialogue !== '-' ? shot.dialogue : '当前镜头暂无对白内容。',
+  cameraLanguage: shot.cameraLanguage,
+  emotionAnchor: shot.emotionAnchor,
+  soundDesign: shot.soundDesign,
+  promptFocus: shot.promptFocus,
+  frames: shot.frames,
+  filmstripFrames: [],
+  videoUrl: shot.videoUrl,
+  videoEvidence: [{
+    id: `${shot.id}-video`,
+    label: `镜头 ${shot.indexLabel}`,
+    title: shot.title,
+    timeRange: shot.timeRange,
+    durationLabel: shot.durationLabel,
+    videoUrl: shot.videoUrl,
+    posterUrl: shot.frames[0]?.imageUrl,
+  }],
+  mergedClipPaths: [],
+  reconstructionStatus: shot.reconstruction?.status,
+  reconstructionConfidence: shot.reconstruction?.confidence,
+  reconstructionCombinedPrompt: shot.reconstruction?.combined_prompt,
+  reconstructionTransitionSummary: shot.reconstruction?.transition_summary,
+  reconstructionNegativePrompt: shot.reconstruction?.negative_prompt,
+  continuityNotes: shot.reconstruction?.continuity_notes?.filter((item) => hasMeaningfulSliceText(item)) || [],
+  missingDetails: shot.reconstruction?.missing_details?.filter((item) => hasMeaningfulSliceText(item)) || [],
+  reconstructionWarnings: shot.reconstruction?.warnings?.filter((item) => hasMeaningfulSliceText(item)) || [],
+});
+
+const buildSliceParagraphDetail = (
+  paragraph: SliceParagraphPreview,
+  paragraphShots: MockSliceShot[],
+): SliceDetailModel => {
+  const reconstructions = paragraphShots
+    .map((shot) => shot.reconstruction)
+    .filter((item): item is BenchmarkSlicePromptReconstruction => !!item);
+  const reconstructedCount = paragraphShots.filter((shot) => {
+    const status = shot.reconstruction?.status;
+    return status === 'ok' || status === 'partial';
+  }).length;
+
+  return {
+    id: paragraph.id,
+    kind: 'merged',
+    label: paragraph.label,
+    title: paragraph.shotRangeLabel,
+    summary: paragraph.summary,
+    timeRange: paragraph.timeRangeLabel,
+    durationLabel: paragraph.totalDurationLabel,
+    shotCount: paragraph.shotCount,
+    scene: paragraph.primaryScene,
+    dialogue: formatSliceDialogueAggregate(
+      paragraphShots.map((shot) => shot.dialogue),
+      { fallback: '当前合并段落暂无对白内容。', maxItems: 3, maxLength: 156, separator: ' / ' },
+    ),
+    cameraLanguage: formatSliceMetaAggregate(paragraphShots.map((shot) => shot.cameraLanguage)),
+    emotionAnchor: formatSliceMetaAggregate(paragraphShots.map((shot) => shot.emotionAnchor)),
+    soundDesign: formatSliceMetaAggregate(paragraphShots.map((shot) => shot.soundDesign)),
+    promptFocus: formatSliceMetaAggregate(paragraphShots.map((shot) => shot.promptFocus), { maxLength: 120 }),
+    frames: buildMergedSliceFrames(paragraph.id, paragraphShots),
+    filmstripFrames: buildMergedSliceFilmstripFrames(paragraph.id, paragraphShots),
+    videoEvidence: paragraphShots.map((shot) => ({
+      id: `${paragraph.id}-${shot.id}-video`,
+      label: `镜头 ${shot.indexLabel}`,
+      title: shot.title,
+      timeRange: shot.timeRange,
+      durationLabel: shot.durationLabel,
+      videoUrl: shot.videoUrl,
+      posterUrl: shot.frames[0]?.imageUrl,
+    })),
+    mergedClipPaths: paragraphShots.map((shot) => shot.clipPath).filter((value): value is string => !!value && value.trim().length > 0),
+    reconstructionStatus: mergeSliceReconstructionStatus(reconstructions),
+    reconstructionConfidence: reconstructedCount > 0 ? `${reconstructedCount}/${paragraph.shotCount} 条镜头已完成反推` : null,
+    reconstructionCombinedPrompt: formatSliceMetaAggregate(
+      reconstructions.map((item) => item.combined_prompt),
+      { fallback: '', maxItems: 2, maxLength: 180, separator: ' / ' },
+    ) || undefined,
+    reconstructionTransitionSummary: formatSliceMetaAggregate(
+      reconstructions.map((item) => item.transition_summary),
+      { fallback: '', maxItems: 2, maxLength: 160, separator: ' / ' },
+    ) || undefined,
+    reconstructionNegativePrompt: formatSliceMetaAggregate(
+      reconstructions.map((item) => item.negative_prompt),
+      { fallback: '', maxItems: 2, maxLength: 160, separator: ' / ' },
+    ) || undefined,
+    continuityNotes: collectSliceMetaTexts(reconstructions.flatMap((item) => item.continuity_notes || [])),
+    missingDetails: collectSliceMetaTexts(reconstructions.flatMap((item) => item.missing_details || [])),
+    reconstructionWarnings: collectSliceMetaTexts(reconstructions.flatMap((item) => item.warnings || [])),
+  };
+};
+
+const shouldStartNewSliceParagraph = (paragraphShots: MockSliceShot[], nextShot: MockSliceShot): boolean => {
+  if (paragraphShots.length === 0) {
+    return false;
+  }
+
+  const firstShot = paragraphShots[0];
+  const previousShot = paragraphShots[paragraphShots.length - 1];
+  const accumulatedDurationSeconds = Math.max(0, nextShot.endSecond - firstShot.startSecond);
+  const gapSeconds = nextShot.startSecond - previousShot.endSecond;
+  const previousScene = normalizeSliceGroupingToken(previousShot.scene);
+  const nextScene = normalizeSliceGroupingToken(nextShot.scene);
+  const resetHintSource = [
+    previousShot.transition,
+    nextShot.transition,
+    nextShot.title,
+    nextShot.beatSummary,
+  ].filter((value): value is string => hasUsableSliceMetaText(value)).join(' ');
+
+  const exceedsShotCap = paragraphShots.length >= SLICE_PARAGRAPH_MAX_SHOTS;
+  const exceedsDurationCap = accumulatedDurationSeconds > SLICE_PARAGRAPH_MAX_DURATION_SECONDS;
+  const breaksSceneContinuity = !!previousScene && !!nextScene && previousScene !== nextScene;
+  const breaksTimeContinuity = gapSeconds > SLICE_PARAGRAPH_MAX_GAP_SECONDS || gapSeconds < -0.5;
+  const hasResetHint = paragraphShots.length >= 2 && SLICE_PARAGRAPH_RESET_HINT_PATTERN.test(resetHintSource);
+
+  return exceedsShotCap || exceedsDurationCap || breaksSceneContinuity || breaksTimeContinuity || hasResetHint;
+};
+
+const buildSliceParagraphPreviews = (shots: MockSliceShot[]): SliceParagraphPreview[] => {
+  if (shots.length === 0) {
+    return [];
+  }
+
+  const groupedShots: MockSliceShot[][] = [];
+
+  shots.forEach((shot) => {
+    const currentGroup = groupedShots[groupedShots.length - 1];
+    if (!currentGroup || shouldStartNewSliceParagraph(currentGroup, shot)) {
+      groupedShots.push([shot]);
+      return;
+    }
+    currentGroup.push(shot);
+  });
+
+  return groupedShots.map((paragraphShots, index) => {
+    const firstShot = paragraphShots[0];
+    const lastShot = paragraphShots[paragraphShots.length - 1];
+    const totalDurationSeconds = Math.max(
+      0,
+      paragraphShots.reduce((maxValue, shot) => Math.max(maxValue, shot.endSecond), firstShot.endSecond) - firstShot.startSecond,
+    );
+    const shotRangeLabel = firstShot.indexLabel === lastShot.indexLabel
+      ? `覆盖镜头 ${firstShot.indexLabel}`
+      : `覆盖镜头 ${firstShot.indexLabel}-${lastShot.indexLabel}`;
+
+    return {
+      id: `slice-paragraph-${String(index + 1).padStart(2, '0')}-${firstShot.id}`,
+      label: `段落 P${String(index + 1).padStart(2, '0')}`,
+      firstShotId: firstShot.id,
+      shotIds: paragraphShots.map((shot) => shot.id),
+      shotCount: paragraphShots.length,
+      shotRangeLabel,
+      timeRangeLabel: `${getSliceShotStartLabel(firstShot)} - ${getSliceShotEndLabel(lastShot)}`,
+      totalDurationLabel: formatSliceDurationLabel(totalDurationSeconds),
+      primaryScene: getSliceParagraphPrimaryScene(paragraphShots),
+      summary: getSliceParagraphSummary(paragraphShots),
+      dialogueExcerpt: getSliceParagraphDialogueExcerpt(paragraphShots),
+    };
+  });
+};
 
 const readSliceSourceValue = (sourceRow: Record<string, unknown> | undefined, ...keys: string[]): string | undefined => {
   for (const key of keys) {
@@ -310,12 +1054,63 @@ const formatSliceDurationLabel = (seconds?: number): string => {
   return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1).replace(/\.0$/, '')} 秒`;
 };
 
-const buildSlicePreviewFrames = (shot: BenchmarkSliceManifestShot, sourceRow?: Record<string, unknown>, outputDir?: string): MockSliceFrame[] => {
+const hasMeaningfulSliceText = (value?: string | null): boolean => typeof value === 'string' && value.trim().length > 0;
+
+const getSliceFramePrompt = (
+  reconstruction: BenchmarkSlicePromptReconstruction | undefined,
+  label: MockSliceFrameLabel,
+): string | undefined => {
+  if (!reconstruction) return undefined;
+  if (label === '首帧') return reconstruction.first_frame_prompt?.trim() || undefined;
+  if (label === '中段') return reconstruction.middle_frame_prompt?.trim() || undefined;
+  if (label === '尾帧') return reconstruction.last_frame_prompt?.trim() || undefined;
+  return undefined;
+};
+
+const getSliceReconstructionStatusLabel = (status?: BenchmarkSlicePromptReconstruction['status']): string => {
+  if (status === 'ok') return '已重建';
+  if (status === 'partial') return '部分可用';
+  if (status === 'pending') return '待完成';
+  if (status === 'skipped') return '已跳过';
+  if (status === 'failed') return '重建失败';
+  return '暂无结果';
+};
+
+const buildSlicePreviewShotId = (shot: BenchmarkSliceManifestShot, manifestIndex: number): string => {
+  const idParts = [
+    `slice-shot-${String(manifestIndex + 1).padStart(3, '0')}`,
+    shot.start_time,
+    shot.end_time,
+    shot.first_frame_path,
+    shot.last_frame_path,
+  ];
+
+  return idParts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join('__');
+};
+
+const buildSlicePreviewFrames = (
+  shot: BenchmarkSliceManifestShot,
+  sourceRow?: Record<string, unknown>,
+  outputDir?: string,
+  reconstruction?: BenchmarkSlicePromptReconstruction,
+): MockSliceFrame[] => {
   const startSeconds = parseSliceTimecodeToSeconds(shot.start_time);
   const endSeconds = parseSliceTimecodeToSeconds(shot.end_time);
   const midpointSeconds = startSeconds !== null && endSeconds !== null ? (startSeconds + endSeconds) / 2 : null;
   const summary = readSliceSourceValue(sourceRow, 'summary', 'beat_summary', 'notes', 'desc') || '用于快速浏览当前镜头的节奏和构图。';
-  const middlePath = shot.middle_frame_path || shot.middle_frame_paths?.[0];
+  const middleFrameCandidates = resolveBenchmarkSliceMiddleFrameCandidates(shot);
+  const representativeMiddleFrame = resolveBenchmarkSliceRepresentativeMiddleFrame(shot);
+  const middleFrameImageUrls = middleFrameCandidates
+    .map((candidate) => buildStoryboardSlicingAssetUrl(candidate.framePath, outputDir))
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const middleTimecode = startSeconds !== null && typeof representativeMiddleFrame?.timestampSeconds === 'number'
+    ? formatMockSliceTimecode(startSeconds + representativeMiddleFrame.timestampSeconds)
+    : midpointSeconds !== null
+      ? formatMockSliceTimecode(midpointSeconds)
+      : shot.start_time;
 
   return [
     {
@@ -325,15 +1120,18 @@ const buildSlicePreviewFrames = (shot: BenchmarkSliceManifestShot, sourceRow?: R
       caption: `起始落点：${summary}`,
       tone: 'warning',
       imageUrl: buildStoryboardSlicingAssetUrl(shot.first_frame_path, outputDir),
+      promptText: getSliceFramePrompt(reconstruction, '首帧'),
     },
-    {
-      id: `${shot.base_name}-middle`,
-      label: '中段',
-      timecode: midpointSeconds !== null ? formatMockSliceTimecode(midpointSeconds) : shot.start_time,
-      caption: readSliceSourceValue(sourceRow, 'middle_caption', 'prompt_focus') || '中段参考帧用于查看镜头中段的信息密度与动作推进。',
-      tone: 'accent',
-      imageUrl: buildStoryboardSlicingAssetUrl(middlePath, outputDir),
-    },
+      {
+        id: `${shot.base_name}-middle`,
+        label: '中段',
+        timecode: middleTimecode,
+        caption: readSliceSourceValue(sourceRow, 'middle_caption', 'prompt_focus') || '中段参考帧用于查看镜头中段的信息密度与动作推进。',
+        tone: 'accent',
+        imageUrl: middleFrameImageUrls[0],
+        fallbackImageUrls: middleFrameImageUrls.slice(1),
+        promptText: getSliceFramePrompt(reconstruction, '中段'),
+      },
     {
       id: `${shot.base_name}-last`,
       label: '尾帧',
@@ -341,6 +1139,7 @@ const buildSlicePreviewFrames = (shot: BenchmarkSliceManifestShot, sourceRow?: R
       caption: readSliceSourceValue(sourceRow, 'tail_caption', 'adjustment') || '尾帧用于确认镜头收束、转场落点与可衔接性。',
       tone: 'success',
       imageUrl: buildStoryboardSlicingAssetUrl(shot.last_frame_path, outputDir),
+      promptText: getSliceFramePrompt(reconstruction, '尾帧'),
     },
   ];
 };
@@ -348,16 +1147,18 @@ const buildSlicePreviewFrames = (shot: BenchmarkSliceManifestShot, sourceRow?: R
 const mapSliceArtifactToPreviewShots = (sliceArtifact?: BenchmarkSliceArtifact): MockSliceShot[] => {
   const manifestShots = sliceArtifact?.manifest?.shots || [];
   return manifestShots
-    .filter((shot) => shot.status !== 'failed' || shot.first_frame_path || shot.last_frame_path)
-    .map((shot, index) => {
+    .map((shot, manifestIndex) => ({ shot, manifestIndex }))
+    .filter(({ shot }) => shot.status !== 'failed' || shot.first_frame_path || shot.last_frame_path)
+    .map(({ shot, manifestIndex }, index) => {
       const sourceRow = shot.source_row;
+      const reconstruction = shot.reconstruction;
       const indexLabel = String(shot.shot_number || index + 1).padStart(2, '0');
       const durationSeconds = typeof shot.duration_seconds === 'number' && Number.isFinite(shot.duration_seconds) ? shot.duration_seconds : 0;
       const title = readSliceSourceValue(sourceRow, 'title') || `镜头 ${indexLabel}`;
       const beatSummary = readSliceSourceValue(sourceRow, 'summary', 'beat_summary', 'notes', 'desc') || '当前镜头已完成拆片，可继续检查三帧和节奏落点。';
 
       return {
-        id: shot.base_name || `slice-shot-${indexLabel}`,
+        id: buildSlicePreviewShotId(shot, manifestIndex),
         indexLabel,
         startSecond: parseSliceTimecodeToSeconds(shot.start_time) ?? index * 3,
         endSecond: parseSliceTimecodeToSeconds(shot.end_time) ?? ((index + 1) * 3),
@@ -366,12 +1167,17 @@ const mapSliceArtifactToPreviewShots = (sliceArtifact?: BenchmarkSliceArtifact):
         timeRange: `${shot.start_time} - ${shot.end_time}`,
         durationLabel: formatSliceDurationLabel(durationSeconds),
         beatSummary,
+        scene: readSliceSourceValue(sourceRow, 'scene', '场景') || '-',
+        dialogue: readSliceSourceValue(sourceRow, 'dialogue', '角色台词', '台词') || '-',
         transition: readSliceSourceValue(sourceRow, 'transition', 'transition_mode') || shot.status,
         cameraLanguage: readSliceSourceValue(sourceRow, 'camera_language', 'camera_movement', 'camera') || '-',
         emotionAnchor: readSliceSourceValue(sourceRow, 'emotion_anchor', 'emotion') || '-',
         soundDesign: readSliceSourceValue(sourceRow, 'sound_design', 'sound') || '-',
         promptFocus: readSliceSourceValue(sourceRow, 'prompt_focus', 'props_vfx', 'visual_focus') || '-',
-        frames: buildSlicePreviewFrames(shot, sourceRow, sliceArtifact?.outputDir),
+        clipPath: shot.clip_path,
+        videoUrl: buildStoryboardSlicingAssetUrl(shot.clip_path, sliceArtifact?.outputDir),
+        reconstruction,
+        frames: buildSlicePreviewFrames(shot, sourceRow, sliceArtifact?.outputDir, reconstruction),
       };
     });
 };
@@ -442,17 +1248,21 @@ const buildMockSliceShot = (
     timeRange: `${formatMockSliceTimestamp(startSecond)} - ${formatMockSliceTimestamp(endSecond)}`,
     durationLabel: `${template.durationSeconds} 秒`,
     beatSummary: template.beatSummary,
+    scene: '-',
+    dialogue: '-',
     transition: template.transition,
     cameraLanguage: template.cameraLanguage,
     emotionAnchor: template.emotionAnchor,
     soundDesign: template.soundDesign,
     promptFocus: template.promptFocus,
+    reconstruction: undefined,
     frames: template.frames.map((frame, frameIndex) => ({
       id: `${shotId}-frame-${padMockSliceNumber(frameIndex + 1)}`,
       label: frame.label,
       timecode: formatMockSliceTimecode(startSecond + Math.min(template.durationSeconds, Math.max(0, frame.timeOffsetSeconds))),
       caption: frame.caption,
       tone: frame.tone,
+      promptText: undefined,
     })),
   };
 };
@@ -680,9 +1490,14 @@ const MOCK_SLICE_TOTAL_COVERAGE_LABEL = formatMockSliceTimestamp(MOCK_SLICE_TOTA
 
 const DEFAULT_MOCK_SLICE_SHOT_ID = MOCK_SLICE_SHOTS[0]?.id ?? '';
 
-const getDashboardHomeSection = (searchParams: URLSearchParams): 'projects' | 'analysis' => (
-  searchParams.get('section') === 'analysis' ? 'analysis' : 'projects'
-);
+const createDashboardCharacterId = () => `char_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+const getDashboardHomeSection = (searchParams: URLSearchParams): DashboardHomeSection => {
+  const section = searchParams.get('section');
+  if (section === 'analysis') return 'analysis';
+  if (section === 'characters') return 'characters';
+  return 'projects';
+};
 
 const getDashboardAnalysisSubView = (searchParams: URLSearchParams): 'benchmark' | 'overview' => (
   searchParams.get('analysisView') === 'overview' ? 'overview' : 'benchmark'
@@ -722,13 +1537,49 @@ const getMockSliceFrameToneClasses = (tone: MockSliceFrameTone) => {
   }
 };
 
+const ResolvedSliceVideoEvidenceCard: React.FC<{ evidence: SliceVideoEvidence }> = ({ evidence }) => {
+  const resolvedVideoUrl = useResolvedVideoUrl(evidence.videoUrl);
+
+  return (
+    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-3">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{evidence.label}</div>
+          <div className="mt-1 text-[11px] font-semibold text-[var(--text-primary)]">{evidence.title}</div>
+        </div>
+        <div className="text-[10px] font-mono text-[var(--text-muted)] md:text-right">
+          <div>{evidence.durationLabel}</div>
+          <div className="mt-1">{evidence.timeRange}</div>
+        </div>
+      </div>
+
+      <div className="mt-3">
+        {resolvedVideoUrl ? (
+          <video
+            src={resolvedVideoUrl}
+            poster={evidence.posterUrl}
+            controls
+            playsInline
+            preload="metadata"
+            className="block aspect-video w-full rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] object-contain"
+          />
+        ) : (
+          <div className="rounded-lg border border-dashed border-[var(--border-secondary)] bg-[var(--bg-primary)]/50 px-4 py-4 text-[11px] leading-6 text-[var(--text-muted)]">
+            当前子镜头暂无可播放的切片视频，可继续结合上方时间段和代表帧检查该合并片段。
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const { showAlert } = useAlert();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState<SeriesProject[]>([]);
-  const [homeSection, setHomeSection] = useState<'projects' | 'analysis'>(() => getDashboardHomeSection(searchParams));
+  const [homeSection, setHomeSection] = useState<DashboardHomeSection>(() => getDashboardHomeSection(searchParams));
   const [analysisSubView, setAnalysisSubView] = useState<'benchmark' | 'overview'>(() => getDashboardAnalysisSubView(searchParams));
   const [isLoading, setIsLoading] = useState(true);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -742,6 +1593,10 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const [importingBenchmarkProjectId, setImportingBenchmarkProjectId] = useState<string | null>(null);
   const [showLibraryModal, setShowLibraryModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [dashboardCharacterQuery, setDashboardCharacterQuery] = useState('');
+  const [showDashboardCharacterAddModal, setShowDashboardCharacterAddModal] = useState(false);
+  const [dashboardCharacterPreviewImage, setDashboardCharacterPreviewImage] = useState<string | null>(null);
+  const [newDashboardCharacterForm, setNewDashboardCharacterForm] = useState({ name: '', gender: '', age: '', personality: '' });
 
   // Video Deconstruct State
   const [videoLink, setVideoLink] = useState('');
@@ -750,13 +1605,26 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   const [hasLoadedBenchmarks, setHasLoadedBenchmarks] = useState(false);
   const [currentBenchmarkId, setCurrentBenchmarkId] = useState<string | null>(() => getDashboardBenchmarkId(searchParams));
   const [isEditingBenchmarkBreakdown, setIsEditingBenchmarkBreakdown] = useState(false);
+  const [benchmarkBreakdownEditorMode, setBenchmarkBreakdownEditorMode] = useState<'edit' | 'adaptation'>('edit');
   const [isBenchmarkBreakdownExpanded, setIsBenchmarkBreakdownExpanded] = useState(false);
   const [isSliceResultsPreviewExpanded, setIsSliceResultsPreviewExpanded] = useState(false);
   const [benchmarkBreakdownDraft, setBenchmarkBreakdownDraft] = useState('');
+  const [adaptationDocumentDraft, setAdaptationDocumentDraft] = useState<AdaptationDocument>(() => createEmptyAdaptationDocument());
   const [isSavingBenchmarkBreakdown, setIsSavingBenchmarkBreakdown] = useState(false);
   const [selectedSliceShotId, setSelectedSliceShotId] = useState(() => getDashboardSliceShotId(searchParams));
+  const [selectedSliceParagraphId, setSelectedSliceParagraphId] = useState('');
+  const selectedSliceInspectorRef = useRef<HTMLDivElement | null>(null);
+  const adaptationWorkspaceRef = useRef<HTMLDivElement | null>(null);
+  const adaptationTextBlockRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
+  const pendingAdaptationFocusBlockIdRef = useRef<string | null>(null);
   const [sliceFrameViewer, setSliceFrameViewer] = useState<SliceFrameViewerState | null>(null);
+  const [isPromptReconstructing, setIsPromptReconstructing] = useState(false);
+  const [promptReconstructionProgress, setPromptReconstructionProgress] = useState<{ completed: number; total: number; currentShotLabel: string; succeeded: number; failed: number; } | null>(null);
   const [activeBenchmarkDownloadArtifacts, setActiveBenchmarkDownloadArtifacts] = useState<Record<string, BenchmarkDownloadArtifact>>({});
+  const [mergedParagraphVideoMap, setMergedParagraphVideoMap] = useState<Record<string, MergedParagraphVideoState>>({});
+  const [expandedMergedEvidenceMap, setExpandedMergedEvidenceMap] = useState<Record<string, boolean>>({});
+  const activeSlicingBenchmarkIdRef = useRef<string | null>(null);
+  const staleSliceRecoveryRef = useRef<Record<string, true>>({});
 
   useEffect(() => {
     const nextHomeSection = getDashboardHomeSection(searchParams);
@@ -800,6 +1668,11 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       } else {
         nextSearchParams.delete('sliceShotId');
       }
+    } else if (homeSection === 'characters') {
+      nextSearchParams.set('section', 'characters');
+      nextSearchParams.delete('analysisView');
+      nextSearchParams.delete('benchmarkId');
+      nextSearchParams.delete('sliceShotId');
     } else {
       nextSearchParams.delete('section');
       nextSearchParams.delete('analysisView');
@@ -876,28 +1749,138 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       : currentDownloadArtifact?.status === 'ready'
         ? '解构中'
         : '分析中'
-    : currentBenchmark?.analysisMode === 'metadata'
-      ? currentBenchmark?.fallbackReason === 'missing_api_key'
-        ? '降级分析'
-        : '元数据分析'
-      : '完整分析';
+      : currentBenchmark?.analysisMode === 'metadata'
+        ? currentBenchmark?.fallbackReason === 'missing_api_key'
+          ? '降级分析'
+          : '元数据分析'
+        : '完整分析';
   const downloadStatusLabel = currentBenchmark
     ? getBenchmarkDownloadStatusLabel({ status: currentBenchmark.status, downloadArtifact: currentDownloadArtifact })
     : '未下载';
   const shouldShowModelConfigAction = currentBenchmark?.fallbackReason === 'missing_api_key' && !!onShowModelConfig;
   const benchmarkBreakdownDisplayText = getBenchmarkBreakdownDisplayText(currentBenchmark);
+  const currentAdaptationDocument = useMemo(
+    () => parseStoredAdaptationDocument(currentBenchmark?.adaptationReport),
+    [currentBenchmark?.adaptationReport],
+  );
+  const benchmarkAdaptationDisplayText = getAdaptationDocumentPlainText(currentAdaptationDocument).trim();
+  const benchmarkAdaptationImageCount = countAdaptationImageBlocks(currentAdaptationDocument);
+  const isBenchmarkBreakdownAdaptationMode = isEditingBenchmarkBreakdown && benchmarkBreakdownEditorMode === 'adaptation';
   const isBenchmarkBreakdownEditable = !!currentBenchmark && currentBenchmark.status !== 'analyzing';
+  const adaptationDraftPlainText = useMemo(
+    () => getAdaptationDocumentPlainText(adaptationDocumentDraft),
+    [adaptationDocumentDraft],
+  );
+  const adaptationDraftImageCount = useMemo(
+    () => countAdaptationImageBlocks(adaptationDocumentDraft),
+    [adaptationDocumentDraft],
+  );
+  const isUsingRichAdaptationEditor = adaptationDraftImageCount > 0 || adaptationDocumentDraft.blocks.length > 1;
+  const isBenchmarkBreakdownSaveDisabled = !isBenchmarkBreakdownEditable
+    || isSavingBenchmarkBreakdown
+    || (isBenchmarkBreakdownAdaptationMode && !hasAdaptationDocumentContent(adaptationDocumentDraft));
   const availableSlicingShots = currentBenchmark ? buildBenchmarkSlicingShots(currentBenchmark) : [];
-  const currentSliceShots = currentBenchmark
-    ? currentBenchmark.sliceArtifact?.manifest?.shots?.length
+  const currentSliceShots = useMemo(() => {
+    if (!currentBenchmark) {
+      return [];
+    }
+
+    return currentBenchmark.sliceArtifact?.manifest?.shots?.length
       ? mapSliceArtifactToPreviewShots(currentBenchmark.sliceArtifact)
-      : MOCK_SLICE_SHOTS
-    : [];
-  const selectedSliceShot = currentSliceShots.find((shot) => shot.id === selectedSliceShotId) || currentSliceShots[0] || null;
+      : MOCK_SLICE_SHOTS;
+  }, [currentBenchmark]);
+  const currentSliceParagraphs = useMemo(
+    () => buildSliceParagraphPreviews(currentSliceShots),
+    [currentSliceShots],
+  );
+  const currentSliceParagraphDetails = useMemo(
+    () => currentSliceParagraphs.map((paragraph) => buildSliceParagraphDetail(
+      paragraph,
+      currentSliceShots.filter((shot) => paragraph.shotIds.includes(shot.id)),
+    )),
+    [currentSliceParagraphs, currentSliceShots],
+  );
+  const selectedSliceShot = useMemo(
+    () => currentSliceShots.find((shot) => shot.id === selectedSliceShotId) || currentSliceShots[0] || null,
+    [currentSliceShots, selectedSliceShotId],
+  );
+  const selectedSliceParagraph = useMemo(
+    () => currentSliceParagraphDetails.find((paragraph) => paragraph.id === selectedSliceParagraphId) || null,
+    [currentSliceParagraphDetails, selectedSliceParagraphId],
+  );
+  const selectedSliceDetail = useMemo(() => {
+    if (selectedSliceParagraph) {
+      return selectedSliceParagraph;
+    }
+    return selectedSliceShot ? buildSliceShotDetail(selectedSliceShot) : null;
+  }, [selectedSliceParagraph, selectedSliceShot]);
+  const activeMergedParagraphVideo = selectedSliceDetail?.kind === 'merged'
+    ? mergedParagraphVideoMap[selectedSliceDetail.id]
+    : undefined;
+  useEffect(() => {
+    selectedSliceInspectorRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+  }, [currentBenchmarkId, selectedSliceDetail?.id]);
+
+  const resolvedSelectedSliceVideoUrl = useResolvedVideoUrl(
+    selectedSliceDetail?.kind === 'merged'
+      ? activeMergedParagraphVideo?.videoUrl
+      : selectedSliceDetail?.videoUrl,
+  );
+  const selectedSliceReconstructionWarnings = selectedSliceDetail?.reconstructionWarnings || [];
+  const selectedSliceContinuityNotes = selectedSliceDetail?.continuityNotes || [];
+  const selectedSliceMissingDetails = selectedSliceDetail?.missingDetails || [];
+  const selectedSliceMetadataItems = useMemo(() => {
+    if (!selectedSliceDetail) {
+      return [];
+    }
+
+    if (selectedSliceDetail.kind === 'merged') {
+      return [
+        { label: '合并时段', value: selectedSliceDetail.timeRange },
+        { label: '总时长', value: selectedSliceDetail.durationLabel },
+        { label: '镜头数', value: `${selectedSliceDetail.shotCount} 条` },
+        { label: '主场景', value: selectedSliceDetail.scene || '-' },
+        { label: '重建状态', value: getSliceReconstructionStatusLabel(selectedSliceDetail.reconstructionStatus) },
+        { label: '运镜语言', value: selectedSliceDetail.cameraLanguage },
+        { label: '情绪落点', value: selectedSliceDetail.emotionAnchor },
+        { label: '声音设计', value: selectedSliceDetail.soundDesign },
+        { label: '提示词聚焦', value: selectedSliceDetail.promptFocus },
+      ];
+    }
+
+    return [
+      { label: '镜头时长', value: selectedSliceDetail.durationLabel },
+      { label: '场景', value: selectedSliceDetail.scene || '-' },
+      { label: '重建状态', value: getSliceReconstructionStatusLabel(selectedSliceDetail.reconstructionStatus) },
+      { label: '运镜语言', value: selectedSliceDetail.cameraLanguage },
+      { label: '情绪落点', value: selectedSliceDetail.emotionAnchor },
+      { label: '声音设计', value: selectedSliceDetail.soundDesign },
+      { label: '提示词聚焦', value: selectedSliceDetail.promptFocus },
+    ];
+  }, [selectedSliceDetail]);
   const isUsingRealSliceData = !!currentBenchmark?.sliceArtifact?.manifest?.shots?.length;
   const currentSliceArtifact = currentBenchmark?.sliceArtifact;
   const isSliceRunning = currentSliceArtifact?.status === 'running';
+  const sliceElapsedLabel = isSliceRunning ? formatElapsedSince(currentSliceArtifact?.requestedAt) : null;
+  const isCurrentSliceRunStale = !!(
+    isSliceRunning
+    && currentSliceArtifact?.requestedAt
+    && (Date.now() - currentSliceArtifact.requestedAt) >= STALE_SLICE_RUNNING_THRESHOLD_MS
+  );
   const canRunSlicing = !!currentBenchmark && currentBenchmark.status === 'completed' && !!currentDownloadArtifact?.localPath && availableSlicingShots.length > 0 && !isSliceRunning;
+  const reconstructedSliceShotCount = currentSliceArtifact?.manifest?.shots?.filter((shot) => {
+    const status = shot.reconstruction?.status;
+    return status === 'ok' || status === 'partial';
+  }).length ?? 0;
+  const canRunPromptReconstruction = !!currentBenchmark
+    && currentBenchmark.status === 'completed'
+    && currentSliceArtifact?.status === 'completed'
+    && !!currentSliceArtifact?.manifest?.shots?.length
+    && !isSliceRunning
+    && !isPromptReconstructing;
+  const promptReconstructionPercent = promptReconstructionProgress && promptReconstructionProgress.total > 0
+    ? Math.round((promptReconstructionProgress.completed / promptReconstructionProgress.total) * 100)
+    : 0;
   const sliceCoverageSeconds = currentSliceShots.length > 0
     ? currentSliceShots[currentSliceShots.length - 1].endSecond - currentSliceShots[0].startSecond
     : 0;
@@ -906,14 +1889,45 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
 
   useEffect(() => {
     setIsEditingBenchmarkBreakdown(false);
+    setBenchmarkBreakdownEditorMode('edit');
     setIsBenchmarkBreakdownExpanded(false);
     setIsSavingBenchmarkBreakdown(false);
     setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
-  }, [currentBenchmarkId, currentBenchmark?.lastModified, benchmarkBreakdownDisplayText]);
+    setAdaptationDocumentDraft(currentAdaptationDocument);
+  }, [currentBenchmarkId, currentBenchmark?.lastModified, benchmarkBreakdownDisplayText, currentAdaptationDocument]);
+
+  useEffect(() => {
+    if (!isEditingBenchmarkBreakdown || benchmarkBreakdownEditorMode !== 'adaptation') {
+      return;
+    }
+
+    const pendingBlockId = pendingAdaptationFocusBlockIdRef.current;
+    if (!pendingBlockId) {
+      return;
+    }
+
+    const target = adaptationTextBlockRefs.current[pendingBlockId];
+    if (!target) {
+      return;
+    }
+
+    target.focus();
+    const cursorPosition = target.value.length;
+    target.setSelectionRange(cursorPosition, cursorPosition);
+    pendingAdaptationFocusBlockIdRef.current = null;
+  }, [adaptationDocumentDraft, isEditingBenchmarkBreakdown, benchmarkBreakdownEditorMode]);
 
   useEffect(() => {
     setIsSliceResultsPreviewExpanded(false);
   }, [currentBenchmarkId]);
+
+  useEffect(() => {
+    setMergedParagraphVideoMap({});
+  }, [currentBenchmarkId, currentSliceArtifact?.manifestPath]);
+
+  useEffect(() => {
+    setExpandedMergedEvidenceMap({});
+  }, [currentBenchmarkId, currentSliceArtifact?.manifestPath]);
 
   useEffect(() => {
     if (!hasLoadedBenchmarks || !currentBenchmarkId || currentBenchmark) {
@@ -922,6 +1936,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
 
     setCurrentBenchmarkId(null);
     setSelectedSliceShotId('');
+    setSelectedSliceParagraphId('');
   }, [hasLoadedBenchmarks, currentBenchmarkId, currentBenchmark]);
 
   useEffect(() => {
@@ -939,6 +1954,40 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
   }, [currentBenchmark, currentSliceShots, selectedSliceShotId]);
 
   useEffect(() => {
+    if (!selectedSliceParagraphId) {
+      return;
+    }
+
+    if (!currentSliceParagraphDetails.some((paragraph) => paragraph.id === selectedSliceParagraphId)) {
+      setSelectedSliceParagraphId('');
+    }
+  }, [currentSliceParagraphDetails, selectedSliceParagraphId]);
+
+  useEffect(() => {
+    if (!currentBenchmark || currentBenchmark.sliceArtifact?.status !== 'running') {
+      return;
+    }
+    if (activeSlicingBenchmarkIdRef.current === currentBenchmark.id) {
+      return;
+    }
+    if (staleSliceRecoveryRef.current[currentBenchmark.id]) {
+      return;
+    }
+    if (!currentBenchmark.sliceArtifact?.requestedAt) {
+      return;
+    }
+    if ((Date.now() - currentBenchmark.sliceArtifact.requestedAt) < STALE_SLICE_RUNNING_THRESHOLD_MS) {
+      return;
+    }
+
+    void handleRecoverStuckSliceRun(
+      currentBenchmark,
+      '检测到上一次拆片任务长时间未完成，已自动重置为失败状态；请重新尝试。',
+      true,
+    );
+  }, [currentBenchmark]);
+
+  useEffect(() => {
     if (!sliceFrameViewer) {
       return;
     }
@@ -953,14 +2002,15 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [sliceFrameViewer]);
 
-  const handleOpenSliceFrameViewer = (frame: MockSliceFrame, shot: MockSliceShot) => {
-    if (!frame.imageUrl) {
+  const handleOpenSliceFrameViewer = (frame: MockSliceFrame, shotTitle: string, imageUrlOverride?: string) => {
+    const resolvedImageUrl = String(imageUrlOverride || frame.imageUrl || '').trim();
+    if (!resolvedImageUrl) {
       return;
     }
 
     setSliceFrameViewer({
-      imageUrl: frame.imageUrl,
-      shotTitle: shot.title,
+      imageUrl: resolvedImageUrl,
+      shotTitle,
       frameLabel: frame.label,
       timecode: frame.timecode,
     });
@@ -970,20 +2020,112 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     setSliceFrameViewer(null);
   };
 
+  const handleGenerateMergedParagraphVideo = async (detail: SliceDetailModel) => {
+    if (detail.kind !== 'merged') {
+      return;
+    }
+
+    const paragraphId = detail.id;
+    const clipPaths = detail.mergedClipPaths;
+    if (clipPaths.length === 0) {
+      setMergedParagraphVideoMap((prev) => ({
+        ...prev,
+        [paragraphId]: {
+          status: 'error',
+          errorMessage: '当前合并段落缺少可用的切片视频路径。',
+        },
+      }));
+      return;
+    }
+
+    setMergedParagraphVideoMap((prev) => ({
+      ...prev,
+      [paragraphId]: {
+        status: 'loading',
+      },
+    }));
+
+    try {
+      const result = await mergeStoryboardSliceClips({
+        clipPaths,
+        outputDir: currentBenchmark?.sliceArtifact?.outputDir,
+        mergeKey: paragraphId,
+      });
+      setMergedParagraphVideoMap((prev) => ({
+        ...prev,
+        [paragraphId]: {
+          status: 'ready',
+          videoUrl: result.videoUrl,
+        },
+      }));
+    } catch (error) {
+      setMergedParagraphVideoMap((prev) => ({
+        ...prev,
+        [paragraphId]: {
+          status: 'error',
+          errorMessage: error instanceof Error ? error.message : '合并段落视频生成失败。',
+        },
+      }));
+    }
+  };
+
   const handleStartEditBenchmarkBreakdown = () => {
     if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
       return;
     }
 
+    setBenchmarkBreakdownEditorMode('edit');
     setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
+    setIsBenchmarkBreakdownExpanded(true);
+    setIsEditingBenchmarkBreakdown(true);
+  };
+
+  const handleStartAdaptBenchmarkBreakdown = () => {
+    if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
+      return;
+    }
+
+    setBenchmarkBreakdownEditorMode('adaptation');
+    setAdaptationDocumentDraft(parseStoredAdaptationDocument(currentBenchmark.adaptationReport));
     setIsBenchmarkBreakdownExpanded(true);
     setIsEditingBenchmarkBreakdown(true);
   };
 
   const handleCancelEditBenchmarkBreakdown = () => {
     setBenchmarkBreakdownDraft(benchmarkBreakdownDisplayText);
+    setAdaptationDocumentDraft(currentAdaptationDocument);
+    setBenchmarkBreakdownEditorMode('edit');
     setIsEditingBenchmarkBreakdown(false);
     setIsBenchmarkBreakdownExpanded(false);
+  };
+
+  const handleChangeAdaptationTextBlock = (blockId: string, nextContent: string) => {
+    setAdaptationDocumentDraft((previous) => updateAdaptationTextBlock(previous, blockId, nextContent));
+  };
+
+  const handleRemoveAdaptationImageBlock = (blockId: string) => {
+    setAdaptationDocumentDraft((previous) => removeAdaptationBlock(previous, blockId));
+  };
+
+  const handleInsertFrameIntoAdaptation = (payload: AdaptationImageInsertPayload) => {
+    if (!currentBenchmark || currentBenchmark.status === 'analyzing') {
+      return;
+    }
+
+    const baseDocument = isBenchmarkBreakdownAdaptationMode
+      ? adaptationDocumentDraft
+      : parseStoredAdaptationDocument(currentBenchmark.adaptationReport);
+    const { document, focusBlockId } = appendAdaptationImageBlock(baseDocument, payload);
+
+    pendingAdaptationFocusBlockIdRef.current = focusBlockId;
+    setAdaptationDocumentDraft(document);
+    setBenchmarkBreakdownEditorMode('adaptation');
+    setIsBenchmarkBreakdownExpanded(true);
+    setIsEditingBenchmarkBreakdown(true);
+
+    window.requestAnimationFrame(() => {
+      adaptationWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
   };
 
   const handleSaveBenchmarkBreakdown = async () => {
@@ -991,24 +2133,63 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       return;
     }
 
-    const nextBreakdownReport = benchmarkBreakdownDraft.trim() || undefined;
+    if (benchmarkBreakdownEditorMode === 'adaptation' && !hasAdaptationDocumentContent(adaptationDocumentDraft)) {
+      return;
+    }
+
+    const nextDocument = benchmarkBreakdownEditorMode === 'adaptation'
+      ? serializeAdaptationDocument(adaptationDocumentDraft)
+      : benchmarkBreakdownDraft.trim() || undefined;
     const benchmarkId = currentBenchmark.id;
+    const savedMode = benchmarkBreakdownEditorMode;
 
     setIsSavingBenchmarkBreakdown(true);
     try {
       await saveBenchmarkVideo({
         ...currentBenchmark,
-        breakdownReport: nextBreakdownReport,
+        breakdownReport: savedMode === 'edit' ? nextDocument : currentBenchmark.breakdownReport,
+        adaptationReport: savedMode === 'adaptation' ? nextDocument : currentBenchmark.adaptationReport,
       });
       await loadBenchmarks();
       setCurrentBenchmarkId(benchmarkId);
+      setBenchmarkBreakdownEditorMode('edit');
       setIsEditingBenchmarkBreakdown(false);
       setIsBenchmarkBreakdownExpanded(false);
-      showAlert('视频拆解方案已保存', { type: 'success' });
+      showAlert(savedMode === 'adaptation' ? '改编文稿已单独保存' : '视频拆解方案已保存', { type: 'success' });
     } catch (error) {
       showAlert(`保存拆解方案失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
     } finally {
       setIsSavingBenchmarkBreakdown(false);
+    }
+  };
+
+  const handleRecoverStuckSliceRun = async (benchmark: BenchmarkVideo, reason: string, silent = false) => {
+    if (benchmark.sliceArtifact?.status !== 'running') {
+      return;
+    }
+
+    staleSliceRecoveryRef.current[benchmark.id] = true;
+    activeSlicingBenchmarkIdRef.current = null;
+
+    try {
+      await saveBenchmarkVideo({
+        ...benchmark,
+        sliceArtifact: {
+          ...(benchmark.sliceArtifact || {}),
+          status: 'failed',
+          finishedAt: Date.now(),
+          errorMessage: reason,
+        },
+      });
+      await loadBenchmarks();
+      setCurrentBenchmarkId(benchmark.id);
+      if (!silent) {
+        showAlert(reason, { type: 'warning' });
+      }
+    } catch (error) {
+      if (!silent) {
+        showAlert(`重置拆片状态失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+      }
     }
   };
 
@@ -1034,20 +2215,24 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
         errorMessage: undefined,
         warnings: [],
         requestMeta: {
-          middleFrames: 1,
+          middleFrames: 0,
           enableSceneDetect: false,
+          enableTurningPoints: true,
         },
       },
     };
 
     try {
+      activeSlicingBenchmarkIdRef.current = currentBenchmark.id;
+      delete staleSliceRecoveryRef.current[currentBenchmark.id];
       await saveBenchmarkVideo(runningBenchmark);
       await loadBenchmarks();
       setCurrentBenchmarkId(currentBenchmark.id);
 
       const completedSliceArtifact = await runBenchmarkSlicing(currentBenchmark, {
-        middleFrames: 1,
+        middleFrames: 0,
         enableSceneDetect: false,
+        enableTurningPoints: true,
       });
 
       await saveBenchmarkVideo({
@@ -1076,6 +2261,49 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
       await loadBenchmarks();
       setCurrentBenchmarkId(currentBenchmark.id);
       showAlert(message, { type: 'error' });
+    } finally {
+      if (activeSlicingBenchmarkIdRef.current === currentBenchmark.id) {
+        activeSlicingBenchmarkIdRef.current = null;
+      }
+    }
+  };
+
+  const handleRunPromptReconstruction = async () => {
+    if (!currentBenchmark) return;
+    if (currentSliceArtifact?.status !== 'completed' || !currentSliceArtifact.manifest?.shots?.length) {
+      showAlert('请先生成真实拆片结果，再执行图片反推。', { type: 'warning' });
+      return;
+    }
+
+    setIsPromptReconstructing(true);
+    setPromptReconstructionProgress({
+      completed: 0,
+      total: currentSliceArtifact.manifest.shots.length,
+      currentShotLabel: `镜头 ${String(currentSliceArtifact.manifest.shots[0]?.shot_number || 1).padStart(2, '0')}`,
+      succeeded: 0,
+      failed: 0,
+    });
+    try {
+      const updatedSliceArtifact = await runBenchmarkPromptReconstruction(currentSliceArtifact, {
+        promptLanguage: 'bilingual',
+        onProgress: (progress) => {
+          setPromptReconstructionProgress(progress);
+        },
+      });
+
+      await saveBenchmarkVideo({
+        ...currentBenchmark,
+        sliceArtifact: updatedSliceArtifact,
+      });
+      await loadBenchmarks();
+      setCurrentBenchmarkId(currentBenchmark.id);
+      showAlert('图片反推已完成，可在下方查看首帧 / 中段 / 尾帧对应提示词。', { type: 'success' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '图片反推失败';
+      showAlert(message, { type: 'error' });
+    } finally {
+      setIsPromptReconstructing(false);
+      setPromptReconstructionProgress(null);
     }
   };
 
@@ -1246,12 +2474,141 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
     }
   }, [showLibraryModal]);
 
+  const dashboardGlobalCharacters = useMemo(
+    () => libraryItems
+      .filter((item) => item.type === 'character')
+      .sort((a, b) => b.updatedAt - a.updatedAt),
+    [libraryItems],
+  );
+  const normalizedDashboardCharacterQuery = dashboardCharacterQuery.trim().toLowerCase();
+  const filteredDashboardCharacters = useMemo(
+    () => (
+      normalizedDashboardCharacterQuery
+        ? dashboardGlobalCharacters.filter((item) => {
+            const character = item.data as Character;
+            return [
+              character.name,
+              character.gender,
+              character.age,
+              character.personality,
+              character.visualPrompt || '',
+              character.coreFeatures || '',
+              item.projectName || '',
+            ]
+              .join(' ')
+              .toLowerCase()
+              .includes(normalizedDashboardCharacterQuery);
+          })
+        : dashboardGlobalCharacters
+    ),
+    [dashboardGlobalCharacters, normalizedDashboardCharacterQuery],
+  );
+
+  useEffect(() => {
+    if (homeSection === 'characters') {
+      void loadLibrary();
+    }
+  }, [homeSection]);
+
+  const saveGlobalCharacterAsset = async (item: AssetLibraryItem) => {
+    await saveAssetToLibrary({
+      ...item,
+      name: (item.data as Character).name,
+      updatedAt: Date.now(),
+    });
+    await loadLibrary();
+  };
+
+  const handleSaveDashboardCharacter = async (item: AssetLibraryItem, asset: LibraryAsset) => {
+    const nextCharacter = asset as Character;
+
+    try {
+      await saveGlobalCharacterAsset({
+        ...item,
+        name: nextCharacter.name,
+        data: {
+          ...nextCharacter,
+          version: Math.max((item.data as Character).version || 1, nextCharacter.version || 1),
+        },
+      });
+    } catch (error) {
+      showAlert(`保存角色失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+    }
+  };
+
+  const handleUploadDashboardCharacterImage = async (item: AssetLibraryItem, file: File) => {
+    try {
+      const base64 = await convertImageToBase64(file);
+      const currentCharacter = item.data as Character;
+      await saveGlobalCharacterAsset({
+        ...item,
+        data: {
+          ...currentCharacter,
+          referenceImage: base64,
+          status: 'completed',
+          version: (currentCharacter.version || 0) + 1,
+        },
+      });
+    } catch (error) {
+      showAlert(`上传失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+    }
+  };
+
+  const handleDeleteDashboardCharacter = (item: AssetLibraryItem) => {
+    const character = item.data as Character;
+
+    showAlert(`确定从全局角色库删除“${character.name}”吗？`, {
+      type: 'warning',
+      showCancel: true,
+      onConfirm: async () => {
+        try {
+          await deleteAssetFromLibrary(item.id);
+          await loadLibrary();
+        } catch (error) {
+          showAlert(`删除角色失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+        }
+      },
+    });
+  };
+
+  const handleAddDashboardCharacter = async () => {
+    if (!newDashboardCharacterForm.name.trim()) {
+      showAlert('请先填写角色名称。', { type: 'warning' });
+      return;
+    }
+
+    const nextCharacter: Character = {
+      id: createDashboardCharacterId(),
+      name: newDashboardCharacterForm.name.trim(),
+      gender: newDashboardCharacterForm.gender.trim() || '未知',
+      age: newDashboardCharacterForm.age.trim() || '未知',
+      personality: newDashboardCharacterForm.personality.trim(),
+      visualPrompt: '',
+      coreFeatures: '',
+      variations: [],
+      version: 1,
+    };
+
+    try {
+      await saveGlobalCharacterAsset(createLibraryItemFromCharacter(nextCharacter));
+      setNewDashboardCharacterForm({ name: '', gender: '', age: '', personality: '' });
+      setShowDashboardCharacterAddModal(false);
+    } catch (error) {
+      showAlert(`添加角色失败: ${error instanceof Error ? error.message : '未知错误'}`, { type: 'error' });
+    }
+  };
+
   const openAnalysisView = (view?: 'benchmark' | 'overview') => {
     setHomeSection('analysis');
     if (view) {
       setAnalysisSubView(view);
     }
   };
+
+  const openCharacterLibraryView = () => {
+    setHomeSection('characters');
+  };
+
 
   const handleCreate = async () => {
     const sp = createNewSeriesProject();
@@ -1416,6 +2773,18 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
               </button>
               <button
                 type="button"
+                onClick={openCharacterLibraryView}
+                aria-pressed={homeSection === 'characters'}
+                className={`w-full flex items-center justify-between px-6 py-4 border-l-2 transition-colors ${homeSection === 'characters' ? 'border-[var(--text-primary)] bg-[var(--nav-active-bg)] text-[var(--text-primary)]' : 'border-transparent text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)]'}`}
+              >
+                <div className="flex items-center gap-3">
+                  <Users className="w-4 h-4" />
+                  <span className="font-medium text-xs tracking-wider uppercase">角色库</span>
+                </div>
+                <span className="text-[10px] font-mono text-[var(--text-tertiary)]">HOME</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => openAnalysisView()}
                 aria-expanded={homeSection === 'analysis'}
                 aria-pressed={homeSection === 'analysis'}
@@ -1497,9 +2866,9 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
               <header className="border-b border-[var(--border-subtle)] pb-6 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
                 <div className="space-y-2">
                   <h2 className="text-3xl font-light text-[var(--text-primary)] tracking-tight flex items-center gap-3">
-                    {homeSection === 'projects' ? '项目库' : '数据分析'}
+                    {homeSection === 'projects' ? '项目库' : homeSection === 'characters' ? '角色库' : '数据分析'}
                     <span className="text-[var(--text-muted)] text-lg">/</span>
-                    <span className="text-[var(--text-muted)] text-sm font-mono tracking-widest uppercase">{homeSection === 'projects' ? 'Projects Database' : analysisSubView === 'benchmark' ? 'Benchmark Analysis' : 'Analysis Overview'}</span>
+                    <span className="text-[var(--text-muted)] text-sm font-mono tracking-widest uppercase">{homeSection === 'projects' ? 'Projects Database' : homeSection === 'characters' ? 'Character Library' : analysisSubView === 'benchmark' ? 'Benchmark Analysis' : 'Analysis Overview'}</span>
                   </h2>
                   <div className="flex items-center gap-2 lg:hidden pt-2">
                     <button
@@ -1508,6 +2877,13 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                       className={`px-4 py-2 text-[10px] font-mono uppercase tracking-widest border transition-colors ${homeSection === 'projects' ? 'border-[var(--text-primary)] bg-[var(--nav-active-bg)] text-[var(--text-primary)]' : 'border-[var(--border-primary)] text-[var(--text-tertiary)]'}`}
                     >
                       项目库
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openCharacterLibraryView}
+                      className={`px-4 py-2 text-[10px] font-mono uppercase tracking-widest border transition-colors ${homeSection === 'characters' ? 'border-[var(--text-primary)] bg-[var(--nav-active-bg)] text-[var(--text-primary)]' : 'border-[var(--border-primary)] text-[var(--text-tertiary)]'}`}
+                    >
+                      角色库
                     </button>
                     <button
                       type="button"
@@ -1675,6 +3051,103 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                     </div>
                   </section>
                 </>
+              ) : homeSection === 'characters' ? (
+                <>
+                  <section className="border border-[var(--border-primary)] bg-[var(--bg-primary)] p-5 md:p-6">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="space-y-2 max-w-3xl">
+                        <h3 className="text-sm md:text-base font-bold text-[var(--text-primary)] tracking-wide">首页角色库</h3>
+                        <p className="text-xs text-[var(--text-tertiary)] leading-relaxed">
+                          在首页直接维护全局角色资产。这里新增、编辑和上传的角色会写入全局角色库，供你跨项目复用。
+                        </p>
+                      </div>
+                      <div className="inline-flex items-center gap-2 border border-[var(--border-secondary)] bg-[var(--bg-sunken)] px-4 py-3 text-[10px] font-mono uppercase tracking-widest text-[var(--text-tertiary)] whitespace-nowrap">
+                        <Archive className="w-4 h-4 text-[var(--accent-text)]" />
+                        Global Asset Store
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="border border-[var(--border-primary)] bg-[var(--bg-base)]">
+                    <div className="px-5 md:px-6 py-5 border-b border-[var(--border-subtle)] flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                      <div>
+                        <h3 className="text-lg text-[var(--text-primary)] font-bold tracking-wide">角色库</h3>
+                        <p className="mt-2 text-[11px] text-[var(--text-tertiary)]">
+                          当前维护的是全局角色资产，不隶属于单个项目。后续可在项目工作流中导入和复用这些角色。
+                        </p>
+                      </div>
+                      <div className="text-[10px] text-[var(--text-muted)] font-mono uppercase tracking-widest">{filteredDashboardCharacters.length} characters</div>
+                    </div>
+
+                    <div className="p-5 md:p-6 space-y-6">
+                      {isLibraryLoading ? (
+                        <div className="flex justify-center py-20">
+                          <Loader2 className="w-6 h-6 text-[var(--text-muted)] animate-spin" />
+                        </div>
+                      ) : (
+                        <>
+                          <div className="grid gap-4 xl:grid-cols-[minmax(240px,1fr)_auto] xl:items-end">
+                            <div>
+                              <div className="text-[10px] font-mono uppercase tracking-widest text-[var(--text-muted)] mb-2">搜索角色</div>
+                              <div className="relative">
+                                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+                                <input
+                                  value={dashboardCharacterQuery}
+                                  onChange={(event) => setDashboardCharacterQuery(event.target.value)}
+                                  placeholder="搜索角色名称、性格或提示词..."
+                                  className="w-full rounded border border-[var(--border-primary)] bg-[var(--bg-primary)] py-3 pl-9 pr-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none transition-colors focus:border-[var(--border-secondary)]"
+                                />
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => setShowDashboardCharacterAddModal(true)}
+                              className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:bg-[var(--btn-primary-hover)] transition-colors text-xs font-bold uppercase tracking-widest"
+                            >
+                              <Plus className="w-4 h-4" />
+                              添加角色
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <span className="inline-flex items-center gap-2 border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-2 text-[10px] font-mono uppercase tracking-widest text-[var(--text-tertiary)]">
+                              <Archive className="w-3.5 h-3.5" />
+                              全局角色资产
+                            </span>
+                            <span className="inline-flex items-center gap-2 border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-2 text-[10px] font-mono uppercase tracking-widest text-[var(--text-tertiary)]">
+                              <Users className="w-3.5 h-3.5" />
+                              {dashboardGlobalCharacters.length} 角色
+                            </span>
+                          </div>
+
+                          {filteredDashboardCharacters.length === 0 ? (
+                            <div className="border border-dashed border-[var(--border-primary)] p-12 text-center text-[var(--text-muted)] bg-[var(--bg-primary)]">
+                              <Users className="w-10 h-10 mx-auto mb-4 opacity-30" />
+                              <p className="text-sm mb-2">{dashboardCharacterQuery ? '未找到匹配角色' : '全局角色库为空'}</p>
+                              <p className="text-[10px] font-mono">点击“添加角色”创建全局角色，后续可在不同项目中复用。</p>
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+                              {filteredDashboardCharacters.map((item) => (
+                                <AssetLibraryEditorCard
+                                  key={item.id}
+                                  type="character"
+                                  asset={item.data as Character}
+                                  refCount={0}
+                                  onSave={(asset) => handleSaveDashboardCharacter(item, asset)}
+                                  onDelete={() => handleDeleteDashboardCharacter(item)}
+                                  onUploadImage={(file) => handleUploadDashboardCharacterImage(item, file)}
+                                  onPreviewImage={setDashboardCharacterPreviewImage}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </section>
+                </>
               ) : (
                 <>
                   {analysisSubView === 'benchmark' ? (
@@ -1706,8 +3179,8 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                         <div className="px-5 md:px-6 py-4 border-b border-[var(--border-subtle)] flex items-center justify-between sticky top-0 bg-[var(--bg-base)] z-20">
                           <div className="flex items-center gap-3">
                             {currentBenchmarkId && (
-                              <button
-                                onClick={() => { setCurrentBenchmarkId(null); setSelectedSliceShotId(''); setVideoLink(''); }}
+                                <button
+                                  onClick={() => { setCurrentBenchmarkId(null); setSelectedSliceShotId(''); setSelectedSliceParagraphId(''); setVideoLink(''); }}
                                 className="p-1 hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
                                 title="返回历史库"
                               >
@@ -1768,9 +3241,9 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                               ) : (
                                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                                   {benchmarkList.map(item => (
-                                    <div 
-                                      key={item.id} 
-                                      onClick={() => { setCurrentBenchmarkId(item.id); setSelectedSliceShotId(''); }}
+                                      <div 
+                                        key={item.id} 
+                                        onClick={() => { setCurrentBenchmarkId(item.id); setSelectedSliceShotId(''); setSelectedSliceParagraphId(''); }}
                                       className="group cursor-pointer border border-[var(--border-primary)] bg-[var(--bg-base)] hover:border-[var(--border-secondary)] p-4 rounded-lg flex flex-col gap-2 transition-colors relative"
                                     >
                                       <button 
@@ -1830,6 +3303,25 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                         {isSliceRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
                                         {currentSliceArtifact?.status === 'completed' ? '重新生成拆片镜头' : isSliceRunning ? '拆片中...' : '生成拆片镜头'}
                                       </button>
+                                      {isSliceRunning && currentBenchmark && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleRecoverStuckSliceRun(currentBenchmark, '已手动重置卡住的拆片状态；现在可以重新尝试。')}
+                                          className="inline-flex items-center gap-2 rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11px] font-bold text-[var(--warning)] transition-colors hover:bg-[var(--warning)]/15"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5" />
+                                          重置拆片状态
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={handleRunPromptReconstruction}
+                                        disabled={!canRunPromptReconstruction}
+                                        className="inline-flex items-center gap-2 rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-bold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        {isPromptReconstructing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                                        {reconstructedSliceShotCount > 0 ? (isPromptReconstructing ? '反推中...' : '重新图片反推') : (isPromptReconstructing ? '反推中...' : '图片反推')}
+                                      </button>
                                       <button
                                         type="button"
                                         onClick={() => setBenchmarkToImport(currentBenchmark)}
@@ -1847,6 +3339,11 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       )}
                                       {currentDownloadArtifact?.localPath && availableSlicingShots.length === 0 && (
                                         <span className="text-[10px] font-mono text-[var(--warning)]">当前拆解方案里还没有可解析的镜头时间表。</span>
+                                      )}
+                                      {isSliceRunning && (
+                                        <span className={`text-[10px] font-mono ${isCurrentSliceRunStale ? 'text-[var(--warning)]' : 'text-[var(--text-muted)]'}`}>
+                                          {sliceElapsedLabel ? `已等待 ${sliceElapsedLabel}` : '正在等待拆片结果'} · 当前版本暂不支持实时拆片进度回传。
+                                        </span>
                                       )}
                                     </div>
                                   )}
@@ -1945,10 +3442,36 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                 </div>
                               )}
 
+                              {isPromptReconstructing && promptReconstructionProgress && (
+                                <div className="rounded-md border border-[var(--accent-border)] bg-[var(--accent-bg)] px-3 py-3 text-xs leading-6 text-[var(--text-primary)]">
+                                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                    <div>
+                                      <div className="font-bold text-[var(--accent-text-hover)]">
+                                        正在执行图片反推：{promptReconstructionProgress.completed}/{promptReconstructionProgress.total}
+                                      </div>
+                                      <div className="text-[11px] text-[var(--text-secondary)]">
+                                        当前处理 {promptReconstructionProgress.currentShotLabel} · 已成功 {promptReconstructionProgress.succeeded} 条 · 失败 {promptReconstructionProgress.failed} 条
+                                      </div>
+                                    </div>
+                                    <div className="text-[11px] font-mono text-[var(--accent-text)]">{promptReconstructionPercent}%</div>
+                                  </div>
+                                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--bg-primary)]/60">
+                                    <div
+                                      className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300 ease-out"
+                                      style={{ width: `${Math.max(4, Math.min(100, promptReconstructionPercent))}%` }}
+                                    />
+                                  </div>
+                                  <div className="mt-2 text-[10px] text-[var(--text-muted)]">
+                                    正在逐镜头读取首帧 / 中段 / 尾帧并生成对应反推提示词，完成后会自动写回当前拆片结果。
+                                  </div>
+                                </div>
+                              )}
+
                               {currentSliceArtifact?.status === 'completed' && (
                                 <div className="rounded-md border border-[var(--success-border)] bg-[var(--success-bg)] px-3 py-2 text-xs leading-6 text-[var(--success-text)]">
                                   已生成真实拆片结果：{currentSliceArtifact.manifest?.summary?.ok_rows ?? currentSliceArtifact.manifest?.shots?.length ?? 0} 条镜头可预览。
                                   {currentSliceArtifact.outputDir ? <span className="ml-2 font-mono break-all">{currentSliceArtifact.outputDir}</span> : null}
+                                  {reconstructedSliceShotCount > 0 ? <span className="ml-2">· 已完成 {reconstructedSliceShotCount} 条镜头图片反推</span> : null}
                                 </div>
                               )}
 
@@ -1979,7 +3502,9 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                 <div>
                                   <h4 className="text-sm font-bold tracking-wide text-[var(--text-primary)]">视频拆解方案</h4>
                                   <p className="mt-1 text-[11px] leading-5 text-[var(--text-muted)]">
-                                    展示当前记录生成的长文本报告；旧记录会基于已保存的分析结果做保守回填。
+                                    {isBenchmarkBreakdownAdaptationMode
+                                      ? '左侧保留当前拆解底稿，右侧可直接改写成新的创作文稿。'
+                                      : '展示当前记录生成的长文本报告；旧记录会基于已保存的分析结果做保守回填。'}
                                   </p>
                                 </div>
                                 {!isEditingBenchmarkBreakdown ? (
@@ -2001,16 +3526,25 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                     >
                                       编辑
                                     </button>
+                                    <button
+                                      type="button"
+                                      onClick={handleStartAdaptBenchmarkBreakdown}
+                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                      className="inline-flex items-center gap-2 rounded-md border border-[var(--accent-border)] bg-[var(--accent-bg)] px-3 py-2 text-[11px] font-bold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      <Wand2 className="h-3.5 w-3.5" />
+                                      改编
+                                    </button>
                                   </div>
                                 ) : (
                                   <div className="flex items-center gap-2">
                                     <button
                                       type="button"
                                       onClick={handleSaveBenchmarkBreakdown}
-                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                      disabled={isBenchmarkBreakdownSaveDisabled}
                                       className="inline-flex items-center gap-2 rounded-md bg-[var(--accent)] px-3 py-2 text-[11px] font-bold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                                     >
-                                      {isSavingBenchmarkBreakdown ? '保存中...' : '保存'}
+                                      {isSavingBenchmarkBreakdown ? '保存中...' : isBenchmarkBreakdownAdaptationMode ? '保存改编' : '保存'}
                                     </button>
                                     <button
                                       type="button"
@@ -2026,12 +3560,196 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                               {(isEditingBenchmarkBreakdown || isBenchmarkBreakdownExpanded) && (
                                 <div className="p-5 md:p-6">
                                   {isEditingBenchmarkBreakdown ? (
-                                    <textarea
-                                      value={benchmarkBreakdownDraft}
-                                      onChange={(e) => setBenchmarkBreakdownDraft(e.target.value)}
-                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
-                                      className="min-h-[360px] max-h-[720px] w-full resize-y rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
-                                    />
+                                    isBenchmarkBreakdownAdaptationMode ? (
+                                      <div className="grid gap-4 xl:grid-cols-[minmax(0,0.96fr)_minmax(0,1.04fr)]">
+                                        <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                          <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-4">
+                                            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                              <div>
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">原始拆解底稿</div>
+                                                <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">当前已保存方案</div>
+                                              </div>
+                                              <div className="text-[10px] font-mono text-[var(--text-muted)]">只读参考</div>
+                                            </div>
+                                            <pre className="mt-4 max-h-[720px] min-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-tertiary)]">
+                                              {benchmarkBreakdownDisplayText}
+                                            </pre>
+                                          </div>
+                                        </div>
+
+                                        <div ref={adaptationWorkspaceRef} className="rounded-xl border border-[var(--accent-border)] bg-[var(--accent-bg)] p-4">
+                                          <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-4">
+                                            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                              <div>
+                                                <div className="inline-flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--accent-text)]">
+                                                  <Wand2 className="h-3.5 w-3.5" />
+                                                  Adaptation Workspace
+                                                </div>
+                                                <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">新改编文稿</div>
+                                                <p className="mt-2 text-[11px] leading-6 text-[var(--text-tertiary)]">
+                                                  以左侧拆解为母稿，从空白页开始改写结构、语气和创作表达；保存后会单独写入改编稿，不覆盖左侧原始拆解底稿。
+                                                </p>
+                                              </div>
+                                              <div className="text-right text-[10px] font-mono text-[var(--text-muted)]">
+                                                <div>{adaptationDraftPlainText.trim().length} 字</div>
+                                                <div className="mt-1">{adaptationDraftImageCount} 张图</div>
+                                                {(benchmarkAdaptationDisplayText || benchmarkAdaptationImageCount > 0) ? <div className="mt-1 text-[9px] uppercase tracking-[0.14em]">已存在改编稿</div> : null}
+                                              </div>
+                                            </div>
+
+                                            <div className="mt-4 rounded-xl border border-[var(--accent-border)] bg-[var(--accent)]/8 px-4 py-3 text-[11px] leading-6 text-[var(--text-tertiary)]">
+                                              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                                <div>
+                                                  下方编辑区支持文字与镜头图混排；在本页下半部分的切片预览中点击“插入改编稿”，就能把对应首帧 / 中段 / 尾帧直接送进这里。
+                                                </div>
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--accent-text)]">
+                                                  Text + Image Blocks
+                                                </div>
+                                              </div>
+                                            </div>
+
+                                            {isUsingRichAdaptationEditor ? (
+                                              <div className="mt-4 space-y-3">
+                                                {adaptationDocumentDraft.blocks.map((block, index) => (
+                                                  block.type === 'text' ? (
+                                                    <div key={block.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3">
+                                                      <div className="flex items-center justify-between gap-3">
+                                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">文本段落 {String(index + 1).padStart(2, '0')}</div>
+                                                        <div className="text-[10px] font-mono text-[var(--text-muted)]">{block.content.trim().length} 字</div>
+                                                      </div>
+                                                      <textarea
+                                                        ref={(node) => {
+                                                          adaptationTextBlockRefs.current[block.id] = node;
+                                                        }}
+                                                        value={block.content}
+                                                        onChange={(e) => handleChangeAdaptationTextBlock(block.id, e.target.value)}
+                                                        disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                                        placeholder="继续撰写这一段改编内容……"
+                                                        className="mt-3 min-h-[140px] w-full resize-y rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] px-4 py-4 text-sm leading-7 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                                                      />
+                                                    </div>
+                                                  ) : (
+                                                    <div key={block.id} className="rounded-xl border border-[var(--accent-border)] bg-[var(--bg-sunken)] p-3">
+                                                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+                                                        <div className="w-full overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 lg:max-w-[240px]">
+                                                          <img
+                                                            src={block.imageUrl}
+                                                            alt={`${block.shotLabel} ${block.frameLabel}`}
+                                                            className="aspect-video w-full rounded-lg object-contain"
+                                                            data-fallback-urls={JSON.stringify(block.fallbackImageUrls || [])}
+                                                            data-fallback-index="0"
+                                                            onError={(event) => {
+                                                              const target = event.currentTarget;
+                                                              const fallbackUrls = JSON.parse(target.dataset.fallbackUrls || '[]') as string[];
+                                                              const nextIndex = Number.parseInt(target.dataset.fallbackIndex || '0', 10);
+                                                              const nextUrl = fallbackUrls[nextIndex];
+                                                              if (nextUrl) {
+                                                                target.dataset.fallbackIndex = String(nextIndex + 1);
+                                                                target.src = nextUrl;
+                                                                return;
+                                                              }
+                                                              target.onerror = null;
+                                                            }}
+                                                          />
+                                                        </div>
+                                                        <div className="min-w-0 flex-1">
+                                                          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                                            <div>
+                                                              <div className="inline-flex items-center rounded-full bg-[var(--accent)]/14 px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--accent-text)]">
+                                                                插入图片块
+                                                              </div>
+                                                              <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{block.shotLabel}{block.shotTitle ? ` · ${block.shotTitle}` : ''}</div>
+                                                            </div>
+                                                            <button
+                                                              type="button"
+                                                              onClick={() => handleRemoveAdaptationImageBlock(block.id)}
+                                                              disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                                              className="inline-flex items-center justify-center rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] p-2 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                                                              title="移除这张插图"
+                                                              aria-label="移除这张插图"
+                                                            >
+                                                              <X className="h-4 w-4" />
+                                                            </button>
+                                                          </div>
+
+                                                          <div className="mt-3 flex flex-wrap gap-2">
+                                                            {[
+                                                              { label: '镜头', value: block.shotLabel },
+                                                              { label: '帧位', value: block.frameLabel },
+                                                              { label: '时间码', value: block.timecode },
+                                                            ].map((item) => (
+                                                              <div key={`${block.id}-${item.label}`} className="rounded-full border border-[var(--border-primary)] bg-[var(--bg-primary)] px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.14em] text-[var(--text-tertiary)]">
+                                                                <span className="text-[var(--text-muted)]">{item.label}</span>
+                                                                <span className="mx-1 text-[var(--border-secondary)]">/</span>
+                                                                <span className="text-[var(--text-primary)] normal-case tracking-normal">{item.value}</span>
+                                                              </div>
+                                                            ))}
+                                                          </div>
+
+                                                          <div className="mt-3 text-[11px] leading-6 text-[var(--text-tertiary)]">
+                                                            {block.caption || '这张图来自下方切片预览，可和上下文文本一起作为改编文稿中的视觉锚点。'}
+                                                          </div>
+                                                        </div>
+                                                      </div>
+                                                    </div>
+                                                  )
+                                                ))}
+                                              </div>
+                                            ) : (
+                                              <textarea
+                                                ref={(node) => {
+                                                  const textBlock = adaptationDocumentDraft.blocks[0];
+                                                  if (textBlock?.type === 'text') {
+                                                    adaptationTextBlockRefs.current[textBlock.id] = node;
+                                                  }
+                                                }}
+                                                value={adaptationDocumentDraft.blocks[0]?.type === 'text' ? adaptationDocumentDraft.blocks[0].content : ''}
+                                                onChange={(e) => {
+                                                  const firstBlock = adaptationDocumentDraft.blocks[0];
+                                                  if (firstBlock?.type === 'text') {
+                                                    handleChangeAdaptationTextBlock(firstBlock.id, e.target.value);
+                                                  }
+                                                }}
+                                                disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                                placeholder="从这里开始改编：例如提炼叙事主线、改写成创作提纲、重组成新的脚本方向……"
+                                                className="mt-4 min-h-[420px] max-h-[720px] w-full resize-y rounded-xl border border-[var(--accent-border)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-muted)] focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                                              />
+                                            )}
+
+                                            <div className="mt-4 flex flex-col gap-3 border-t border-[var(--border-subtle)] pt-4 md:flex-row md:items-center md:justify-between">
+                                              <p className="text-[11px] leading-6 text-[var(--text-muted)]">
+                                                取消会回到原始拆解方案；改编模式下支持纯文字保存，也支持带镜头图的图文混排保存。
+                                              </p>
+                                              <div className="flex items-center gap-2">
+                                                <button
+                                                  type="button"
+                                                  onClick={handleCancelEditBenchmarkBreakdown}
+                                                  disabled={isSavingBenchmarkBreakdown}
+                                                  className="inline-flex items-center gap-2 rounded-md border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-bold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                                >
+                                                  取消
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={handleSaveBenchmarkBreakdown}
+                                                  disabled={isBenchmarkBreakdownSaveDisabled}
+                                                  className="inline-flex items-center gap-2 rounded-md bg-[var(--accent)] px-3 py-2 text-[11px] font-bold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                                >
+                                                  {isSavingBenchmarkBreakdown ? '保存中...' : '保存改编'}
+                                                </button>
+                                              </div>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <textarea
+                                        value={benchmarkBreakdownDraft}
+                                        onChange={(e) => setBenchmarkBreakdownDraft(e.target.value)}
+                                        disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                        className="min-h-[360px] max-h-[720px] w-full resize-y rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+                                      />
+                                    )
                                   ) : (
                                     <pre className="max-h-[720px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4 text-sm leading-7 text-[var(--text-tertiary)]">
                                       {benchmarkBreakdownDisplayText}
@@ -2042,7 +3760,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                             </div>
                           )}
 
-                          {currentBenchmarkId && currentBenchmark && selectedSliceShot && (
+                          {currentBenchmarkId && currentBenchmark && selectedSliceDetail && (
                             <div className="mt-6 overflow-hidden rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)]">
                               <div className={`flex flex-col gap-4 px-5 py-4 md:px-6 xl:flex-row xl:items-end xl:justify-between ${isSliceResultsPreviewExpanded ? 'border-b border-[var(--border-subtle)]' : ''}`}>
                                 <div className="space-y-2 max-w-3xl">
@@ -2065,7 +3783,7 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                       { label: isUsingRealSliceData ? '真实镜头' : 'Mock 镜头', value: `${currentSliceShots.length} 条` },
                                       { label: '关键帧卡', value: `${sliceFrameCount} 张` },
                                       { label: '覆盖时长', value: sliceCoverageLabel },
-                                      { label: '当前选择', value: `镜头 ${selectedSliceShot.indexLabel}` },
+                                      { label: '当前选择', value: selectedSliceDetail.label },
                                     ].map((item) => (
                                       <div key={item.label} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
                                         <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--text-muted)]">{item.label}</div>
@@ -2089,10 +3807,67 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                 <div className="space-y-5 p-5 md:p-6">
                                   <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.9fr)] xl:items-start">
                                     <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4">
-                                      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                      <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-4">
+                                        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                                          <div>
+                                            <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">合并镜头卡组</div>
+                                            <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">按场景与连续时长归并成独立段落卡，点击后直接查看合并后的段落详情</div>
+                                          </div>
+                                          <div className="text-[11px] leading-6 text-[var(--text-tertiary)] xl:max-w-xs">
+                                            基于相邻镜头的场景、时间连续性、总时长、镜头数和轻量转场提示做本地归并；该卡组只负责展示合并段落，不会替换下方原始单镜头卡组语义。
+                                          </div>
+                                        </div>
+
+                                        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                                          {currentSliceParagraphs.map((paragraph) => {
+                                            const isActive = paragraph.id === selectedSliceParagraphId;
+                                            return (
+                                              <button
+                                                key={paragraph.id}
+                                                type="button"
+                                                aria-pressed={isActive}
+                                                onClick={() => setSelectedSliceParagraphId(paragraph.id)}
+                                                className={`group rounded-xl border px-4 py-4 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-sunken)]/35 hover:bg-[var(--bg-hover)]'}`}
+                                              >
+                                                <div className="flex items-start justify-between gap-3">
+                                                  <div>
+                                                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${isActive ? 'bg-[var(--accent)]/14 text-[var(--accent)]' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'}`}>
+                                                      {paragraph.label}
+                                                    </span>
+                                                    <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{paragraph.shotRangeLabel}</div>
+                                                  </div>
+                                                  <div className="text-right">
+                                                    <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{paragraph.shotCount} 镜头</div>
+                                                    <div className="mt-1 text-[10px] font-mono text-[var(--text-muted)]">{paragraph.totalDurationLabel}</div>
+                                                  </div>
+                                                </div>
+
+                                                <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{paragraph.timeRangeLabel}</div>
+                                                <div className="mt-3 text-[11px] leading-6 text-[var(--text-primary)]">{paragraph.summary}</div>
+
+                                                <div className="mt-3 text-[10px] leading-5 text-[var(--text-muted)]">
+                                                  <span className="text-[var(--text-tertiary)]">主场景：</span>
+                                                  {paragraph.primaryScene}
+                                                </div>
+
+                                                {paragraph.dialogueExcerpt && (
+                                                  <div className="mt-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
+                                                    <div className="text-[9px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">对白摘录</div>
+                                                    <div className="mt-1 line-clamp-2 text-[11px] leading-5 text-[var(--text-primary)]">
+                                                      “{paragraph.dialogueExcerpt}”
+                                                    </div>
+                                                  </div>
+                                                )}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+
+                                      <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                                         <div>
                                           <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头矩阵</div>
-                                          <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要精修的段落</div>
+                                          <div className="mt-2 text-sm font-semibold text-[var(--text-primary)]">平铺浏览全部切片镜头，直接挑选想要继续精修的单镜头</div>
                                         </div>
                                         <div className="text-[11px] text-[var(--text-tertiary)] xl:max-w-xs">
                                           {isUsingRealSliceData ? '当前列表来自真实切片 manifest；选中后，右侧会固定显示首中尾三帧、节奏摘要和元数据。' : '所有 mock 镜头默认平铺展示；选中后，右侧检视器会持续显示三帧占位、节奏注解和演化动作入口。'}
@@ -2101,13 +3876,17 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
 
                                       <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                                         {currentSliceShots.map((shot) => {
-                                          const isActive = shot.id === selectedSliceShot.id;
+                                          const isActive = !selectedSliceParagraphId && shot.id === selectedSliceShot?.id;
+                                          const hasDialogue = hasBenchmarkText(shot.dialogue) && shot.dialogue !== '-';
                                           return (
                                             <button
                                               key={shot.id}
                                               type="button"
                                               aria-pressed={isActive}
-                                              onClick={() => setSelectedSliceShotId(shot.id)}
+                                              onClick={() => {
+                                                setSelectedSliceParagraphId('');
+                                                setSelectedSliceShotId(shot.id);
+                                              }}
                                               className={`group rounded-xl border px-4 py-3 text-left transition-colors ${isActive ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-[var(--border-primary)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]'}`}
                                             >
                                               <div className="flex items-center justify-between gap-3">
@@ -2118,6 +3897,20 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                               </div>
                                               <div className="mt-3 text-sm font-semibold text-[var(--text-primary)]">{shot.title}</div>
                                               <div className="mt-2 text-[11px] leading-5 text-[var(--text-tertiary)]">{shot.beatSummary}</div>
+                                              {hasBenchmarkText(shot.scene) && (
+                                                <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">
+                                                  <span className="text-[var(--text-tertiary)]">场景：</span>
+                                                  {shot.scene}
+                                                </div>
+                                              )}
+                                              {hasDialogue && (
+                                                <div className="mt-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-3 py-3">
+                                                  <div className="text-[9px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">对白摘录</div>
+                                                  <div className="mt-1 line-clamp-2 text-[11px] leading-5 text-[var(--text-primary)]">
+                                                    “{shot.dialogue}”
+                                                  </div>
+                                                </div>
+                                              )}
                                               <div className="mt-3 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{shot.timeRange}</div>
                                             </button>
                                           );
@@ -2126,26 +3919,227 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                     </div>
 
                                     <div className="self-start xl:sticky xl:top-6">
-                                      <div className="space-y-4 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
-                                        <div className="flex flex-col gap-2 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4">
-                                          <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-                                            <div>
-                                              <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">选中镜头详情</div>
-                                              <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">镜头 {selectedSliceShot.indexLabel} · {selectedSliceShot.title}</div>
-                                              <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedSliceShot.beatSummary}</div>
+                                        <div ref={selectedSliceInspectorRef} className="space-y-4 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)]/40 p-4 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
+                                          <div className="flex flex-col gap-2 rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] px-4 py-4">
+                                            <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                                              <div>
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? '选中合并段落详情' : '选中镜头详情'}</div>
+                                                <div className="mt-2 text-base font-semibold text-[var(--text-primary)]">{selectedSliceDetail.label} · {selectedSliceDetail.title}</div>
+                                                <div className="mt-1 text-[11px] leading-5 text-[var(--text-tertiary)]">{selectedSliceDetail.summary}</div>
+                                              </div>
+                                              <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceDetail.timeRange}</div>
                                             </div>
-                                            <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceShot.timeRange}</div>
+                                            <p className="text-[11px] leading-5 text-[var(--text-muted)]">
+                                              {selectedSliceDetail.kind === 'merged'
+                                                ? '当前右侧正在展示合并段落的独立详情模型：时间范围、总时长、段落摘要、代表帧与子镜头证据都会按段落聚合展示。'
+                                                : '浏览左侧镜头矩阵时，当前镜头的对白摘录、三帧摘要、图片反推提示词、元数据和后续操作会固定保留在右侧，方便持续对照。'}
+                                            </p>
                                           </div>
-                                          <p className="text-[11px] leading-5 text-[var(--text-muted)]">
-                                            浏览左侧镜头矩阵时，当前镜头的三帧摘要、元数据和后续操作会固定保留在右侧，方便持续对照。
-                                          </p>
-                                        </div>
 
-                                        <div className="space-y-3">
-                                          {selectedSliceShot.frames.map((frame) => {
-                                            const toneClasses = getMockSliceFrameToneClasses(frame.tone);
-                                            return (
-                                              <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
+                                          <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                            <div className="flex items-center justify-between gap-3">
+                                              <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? '片段视频证据' : '切片视频'}</div>
+                                              <div className="text-[10px] font-mono text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? `按子镜头列出 ${selectedSliceDetail.shotCount} 条切片证据` : '点击视频即可播放 / 暂停'}</div>
+                                            </div>
+                                            <div className="mt-4">
+                                              {selectedSliceDetail.kind === 'merged' ? (
+                                                <div className="space-y-3">
+                                                  {resolvedSelectedSliceVideoUrl ? (
+                                                    <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-3">
+                                                      <div className="flex items-center justify-between gap-3">
+                                                        <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">合并段落视频</div>
+                                                        <div className="text-[10px] font-mono text-[var(--text-muted)]">按当前段落时序拼接</div>
+                                                      </div>
+                                                      <video
+                                                        key={selectedSliceDetail.id}
+                                                        src={resolvedSelectedSliceVideoUrl}
+                                                        poster={selectedSliceDetail.frames[0]?.imageUrl}
+                                                        controls
+                                                        playsInline
+                                                        preload="metadata"
+                                                        className="mt-3 block aspect-video w-full rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] object-contain"
+                                                      />
+                                                    </div>
+                                                  ) : activeMergedParagraphVideo?.status === 'loading' ? (
+                                                    <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-4 py-4 text-[11px] leading-6 text-[var(--text-muted)]">
+                                                      正在后台拼接当前段落视频；你可以先看下方子镜头证据和关键帧胶片条。
+                                                    </div>
+                                                  ) : (
+                                                    <div className="rounded-lg border border-dashed border-[var(--border-secondary)] bg-[var(--bg-primary)]/60 px-4 py-4">
+                                                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                                        <div>
+                                                          <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">合并段落视频</div>
+                                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-muted)]">默认先显示子镜头证据，按需再生成一条完整段落视频，避免长时间等待。</div>
+                                                        </div>
+                                                        <button
+                                                          type="button"
+                                                          onClick={() => handleGenerateMergedParagraphVideo(selectedSliceDetail)}
+                                                          className="inline-flex items-center justify-center rounded-lg bg-[var(--accent)] px-4 py-2 text-[11px] font-bold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-hover)]"
+                                                        >
+                                                          生成合并视频
+                                                        </button>
+                                                      </div>
+                                                    </div>
+                                                  )}
+
+                                                  {activeMergedParagraphVideo?.status === 'error' && (
+                                                    <div className="rounded-lg border border-dashed border-[var(--warning)]/40 bg-[var(--warning)]/10 px-4 py-4 text-[11px] leading-6 text-[var(--warning)]">
+                                                      {activeMergedParagraphVideo.errorMessage || '当前合并段落视频生成失败，已降级为子镜头证据列表。'}
+                                                    </div>
+                                                  )}
+
+                                                  {selectedSliceDetail.videoEvidence.length > 0 ? (
+                                                    <div className="space-y-3">
+                                                      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-4 py-3">
+                                                        <div>
+                                                          <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">子镜头证据</div>
+                                                          <div className="mt-1 text-[11px] leading-5 text-[var(--text-muted)]">默认折叠，只有在需要逐条核对时再展开。</div>
+                                                        </div>
+                                                        <button
+                                                          type="button"
+                                                          onClick={() => setExpandedMergedEvidenceMap((prev) => ({
+                                                            ...prev,
+                                                            [selectedSliceDetail.id]: !prev[selectedSliceDetail.id],
+                                                          }))}
+                                                          className="inline-flex items-center justify-center rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-sunken)] px-3 py-2 text-[11px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--bg-hover)]"
+                                                        >
+                                                          {expandedMergedEvidenceMap[selectedSliceDetail.id] ? '收起子镜头证据' : `展开子镜头证据（${selectedSliceDetail.videoEvidence.length}）`}
+                                                        </button>
+                                                      </div>
+
+                                                      {expandedMergedEvidenceMap[selectedSliceDetail.id] && (
+                                                        <div className="space-y-3">
+                                                          {selectedSliceDetail.videoEvidence.map((evidence) => (
+                                                            <ResolvedSliceVideoEvidenceCard key={evidence.id} evidence={evidence} />
+                                                          ))}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  ) : (
+                                                    <div className="rounded-lg border border-dashed border-[var(--border-secondary)] bg-[var(--bg-primary)]/50 px-4 py-4 text-[11px] leading-6 text-[var(--text-muted)]">
+                                                      当前合并段落暂无可展示的子镜头视频证据。
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              ) : resolvedSelectedSliceVideoUrl ? (
+                                                <video
+                                                  key={selectedSliceDetail.id}
+                                                  src={resolvedSelectedSliceVideoUrl}
+                                                  poster={selectedSliceDetail.frames[0]?.imageUrl}
+                                                  controls
+                                                  playsInline
+                                                  preload="metadata"
+                                                  className="block aspect-video w-full rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] object-contain"
+                                                />
+                                              ) : (
+                                                <div className="rounded-lg border border-dashed border-[var(--border-secondary)] bg-[var(--bg-primary)]/50 px-4 py-4 text-[11px] leading-6 text-[var(--text-muted)]">
+                                                  {selectedSliceDetail.kind === 'merged'
+                                                    ? '当前合并段落暂无可播放的子镜头视频证据，请先完成真实拆片后再查看。'
+                                                    : '当前镜头暂无可播放的切片视频，请先完成真实拆片后再查看。'}
+                                                </div>
+                                              )}
+                                            </div>
+                                          </div>
+
+                                          {selectedSliceDetail.kind === 'merged' && selectedSliceDetail.filmstripFrames.length > 0 && (
+                                            <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                              <div className="flex items-center justify-between gap-3">
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">中段关键帧胶片条</div>
+                                                <div className="text-[10px] font-mono text-[var(--text-muted)]">按子镜头时间顺序排布</div>
+                                              </div>
+                                              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                                                {selectedSliceDetail.filmstripFrames.map((frame) => (
+                                                  <div
+                                                    key={frame.id}
+                                                    className="group rounded-xl border border-[var(--border-primary)] bg-[var(--bg-primary)] p-3 transition-colors hover:bg-[var(--bg-hover)]"
+                                                  >
+                                                    <button
+                                                      type="button"
+                                                      onClick={(event) => {
+                                                        const currentImage = event.currentTarget.querySelector('img');
+                                                        const resolvedImageUrl = currentImage?.currentSrc || currentImage?.getAttribute('src') || frame.imageUrl;
+                                                        handleOpenSliceFrameViewer({
+                                                          id: frame.id,
+                                                          label: '中段',
+                                                          timecode: frame.timecode,
+                                                          caption: `${frame.shotLabel} · ${frame.title}`,
+                                                          tone: 'accent',
+                                                          imageUrl: frame.imageUrl,
+                                                          fallbackImageUrls: frame.fallbackImageUrls,
+                                                        }, `${selectedSliceDetail.label} · ${selectedSliceDetail.title}`, resolvedImageUrl || undefined);
+                                                      }}
+                                                      className="block w-full text-left"
+                                                    >
+                                                      <div className="aspect-video overflow-hidden rounded-lg border border-[var(--border-primary)] bg-[var(--bg-base)] p-2">
+                                                        <img
+                                                          src={frame.imageUrl}
+                                                          alt={`${frame.shotLabel} ${frame.title}`}
+                                                          className="h-full w-full rounded-md object-contain"
+                                                          data-fallback-urls={JSON.stringify(frame.fallbackImageUrls || [])}
+                                                          data-fallback-index="0"
+                                                          onError={(event) => {
+                                                            const target = event.currentTarget;
+                                                            const fallbackUrls = JSON.parse(target.dataset.fallbackUrls || '[]') as string[];
+                                                            const nextIndex = Number.parseInt(target.dataset.fallbackIndex || '0', 10);
+                                                            const nextUrl = fallbackUrls[nextIndex];
+                                                            if (nextUrl) {
+                                                              target.dataset.fallbackIndex = String(nextIndex + 1);
+                                                              target.src = nextUrl;
+                                                              return;
+                                                            }
+                                                            target.onerror = null;
+                                                          }}
+                                                        />
+                                                      </div>
+                                                      <div className="mt-3 flex items-start justify-between gap-3">
+                                                        <div>
+                                                          <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{frame.shotLabel}</div>
+                                                          <div className="mt-1 text-[11px] font-semibold text-[var(--text-primary)]">{frame.title}</div>
+                                                        </div>
+                                                        <div className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</div>
+                                                      </div>
+                                                    </button>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleInsertFrameIntoAdaptation({
+                                                        imageUrl: frame.imageUrl,
+                                                        fallbackImageUrls: frame.fallbackImageUrls,
+                                                        shotLabel: frame.shotLabel,
+                                                        shotTitle: frame.title,
+                                                        frameLabel: '中段',
+                                                        timecode: frame.timecode,
+                                                        caption: `${frame.shotLabel} · ${frame.title}`,
+                                                        source: 'filmstrip',
+                                                      })}
+                                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--accent-border)] bg-[var(--accent-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                      <Plus className="h-3.5 w-3.5" />
+                                                      插入改编稿
+                                                    </button>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+
+                                        <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">对白高亮</div>
+                                            <div className="mt-3 flex items-start gap-3 rounded-xl border border-[var(--border-secondary)] bg-[var(--accent)]/6 px-4 py-4">
+                                              <div className="text-2xl leading-none text-[var(--accent)]/65">“</div>
+                                              <div className="min-w-0 flex-1 text-[11px] leading-7 text-[var(--text-primary)]">
+                                                {selectedSliceDetail.dialogue}
+                                              </div>
+                                            </div>
+                                          </div>
+
+                                          <div className="space-y-3">
+                                            {selectedSliceDetail.frames
+                                              .filter((frame) => !(selectedSliceDetail.kind === 'merged' && frame.label === '中段'))
+                                              .map((frame) => {
+                                              const toneClasses = getMockSliceFrameToneClasses(frame.tone);
+                                              return (
+                                                <div key={frame.id} className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-3 space-y-3">
                                                 <div className="flex items-center justify-between gap-3">
                                                   <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] ${toneClasses.badge}`}>
                                                     {frame.label}
@@ -2156,11 +4150,33 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                                 {frame.imageUrl ? (
                                                   <button
                                                     type="button"
-                                                    onClick={() => handleOpenSliceFrameViewer(frame, selectedSliceShot)}
+                                                    onClick={(event) => {
+                                                      const currentImage = event.currentTarget.querySelector('img');
+                                                      const resolvedImageUrl = currentImage?.currentSrc || currentImage?.getAttribute('src') || frame.imageUrl;
+                                                      handleOpenSliceFrameViewer(frame, `${selectedSliceDetail.label} · ${selectedSliceDetail.title}`, resolvedImageUrl || undefined);
+                                                    }}
                                                     className="group relative block w-full aspect-video overflow-hidden rounded-xl border border-[var(--border-primary)] bg-[var(--bg-base)] p-2 text-left transition-colors hover:border-[var(--border-secondary)]"
-                                                    aria-label={`查看${selectedSliceShot.title}${frame.label}大图`}
+                                                    aria-label={`查看${selectedSliceDetail.title}${frame.label}大图`}
                                                   >
-                                                    <img src={frame.imageUrl} alt={`${selectedSliceShot.title} ${frame.label}`} className="h-full w-full rounded-lg object-contain" />
+                                                    <img
+                                                      src={frame.imageUrl}
+                                                      alt={`${selectedSliceDetail.title} ${frame.label}`}
+                                                      className="h-full w-full rounded-lg object-contain"
+                                                      data-fallback-urls={JSON.stringify(frame.fallbackImageUrls || [])}
+                                                      data-fallback-index="0"
+                                                      onError={(event) => {
+                                                        const target = event.currentTarget;
+                                                        const fallbackUrls = JSON.parse(target.dataset.fallbackUrls || '[]') as string[];
+                                                        const nextIndex = Number.parseInt(target.dataset.fallbackIndex || '0', 10);
+                                                        const nextUrl = fallbackUrls[nextIndex];
+                                                        if (nextUrl) {
+                                                          target.dataset.fallbackIndex = String(nextIndex + 1);
+                                                          target.src = nextUrl;
+                                                          return;
+                                                        }
+                                                        target.onerror = null;
+                                                      }}
+                                                    />
                                                     <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between rounded-b-lg bg-[var(--bg-base)]/82 px-3 py-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                                                       <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-secondary)]">点击查看大图</span>
                                                       <span className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</span>
@@ -2181,32 +4197,133 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
                                                   </div>
                                                 )}
 
-                                                <div>
+                                                  <div>
                                                   <div className="text-[11px] font-semibold text-[var(--text-primary)]">{frame.caption}</div>
-                                                  <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">用于预览该镜头在首帧 / 中段 / 尾帧上的信息密度和构图落点。</div>
+                                                  <div className="mt-2 text-[10px] leading-5 text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? '用于预览该合并段落在段首 / 段中 / 段尾上的代表性信息密度和构图落点。' : '用于预览该镜头在首帧 / 中段 / 尾帧上的信息密度和构图落点。'}</div>
+                                                  {hasMeaningfulSliceText(frame.promptText) && (
+                                                    <div className="mt-3 rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                      <div className="text-[9px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">图片反推提示词</div>
+                                                      <div className="mt-2 text-[11px] leading-6 text-[var(--text-primary)]">{frame.promptText}</div>
+                                                    </div>
+                                                  )}
+                                                  {frame.imageUrl && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleInsertFrameIntoAdaptation({
+                                                        imageUrl: frame.imageUrl!,
+                                                        fallbackImageUrls: frame.fallbackImageUrls,
+                                                        shotLabel: selectedSliceDetail.label,
+                                                        shotTitle: selectedSliceDetail.title,
+                                                        frameLabel: frame.label,
+                                                        timecode: frame.timecode,
+                                                        caption: frame.caption,
+                                                        source: 'slice-frame',
+                                                      })}
+                                                      disabled={!isBenchmarkBreakdownEditable || isSavingBenchmarkBreakdown}
+                                                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--accent-border)] bg-[var(--accent-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--accent-text)] transition-colors hover:bg-[var(--accent-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                      <Plus className="h-3.5 w-3.5" />
+                                                      插入改编稿
+                                                    </button>
+                                                  )}
                                                 </div>
                                               </div>
                                             );
                                           })}
                                         </div>
 
+                                          <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
+                                            <div className="flex items-center justify-between gap-3">
+                                              <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">图片反推提示词</div>
+                                              <div className="text-[10px] font-mono text-[var(--text-muted)]">
+                                                {getSliceReconstructionStatusLabel(selectedSliceDetail.reconstructionStatus)}
+                                                {hasMeaningfulSliceText(selectedSliceDetail.reconstructionConfidence) ? ` · ${selectedSliceDetail.reconstructionConfidence}` : ''}
+                                              </div>
+                                            </div>
+                                            <div className="mt-4 space-y-3">
+                                              {selectedSliceDetail.frames.some((frame) => hasMeaningfulSliceText(frame.promptText)) ? (
+                                                selectedSliceDetail.frames.map((frame) => (
+                                                  hasMeaningfulSliceText(frame.promptText) ? (
+                                                    <div key={`${frame.id}-prompt-summary`} className="rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                      <div className="flex items-center justify-between gap-3">
+                                                      <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{frame.label}反推提示词</div>
+                                                      <div className="text-[10px] font-mono text-[var(--text-muted)]">{frame.timecode}</div>
+                                                    </div>
+                                                    <div className="mt-2 text-[11px] leading-6 text-[var(--text-primary)]">{frame.promptText}</div>
+                                                  </div>
+                                                ) : null
+                                              ))
+                                              ) : (
+                                                <div className="rounded-lg border border-dashed border-[var(--border-secondary)] bg-[var(--bg-primary)]/50 px-3 py-3 text-[11px] leading-6 text-[var(--text-muted)]">
+                                                  {selectedSliceDetail.kind === 'merged' ? '当前合并段落暂无可展示的聚合图片反推提示词。' : '当前镜头暂无可展示的图片反推提示词。'}
+                                                </div>
+                                              )}
+
+                                              {hasMeaningfulSliceText(selectedSliceDetail.reconstructionCombinedPrompt) && (
+                                                <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                  <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">整体提示词总结</div>
+                                                  <div className="mt-2 text-[11px] leading-6 text-[var(--text-primary)]">{selectedSliceDetail.reconstructionCombinedPrompt}</div>
+                                                </div>
+                                              )}
+
+                                              {hasMeaningfulSliceText(selectedSliceDetail.reconstructionTransitionSummary) && (
+                                                <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                  <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? '段落演化摘要' : '镜头演化摘要'}</div>
+                                                  <div className="mt-2 text-[11px] leading-6 text-[var(--text-primary)]">{selectedSliceDetail.reconstructionTransitionSummary}</div>
+                                                </div>
+                                              )}
+
+                                              {hasMeaningfulSliceText(selectedSliceDetail.reconstructionNegativePrompt) && (
+                                                <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                  <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">负向提示词</div>
+                                                  <div className="mt-2 text-[11px] leading-6 text-[var(--text-primary)]">{selectedSliceDetail.reconstructionNegativePrompt}</div>
+                                                </div>
+                                              )}
+
+                                            {selectedSliceContinuityNotes.length > 0 && (
+                                              <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">连戏备注</div>
+                                                <ul className="mt-2 space-y-2 text-[11px] leading-6 text-[var(--text-primary)]">
+                                                  {selectedSliceContinuityNotes.map((note) => (
+                                                    <li key={note} className="flex gap-2"><span className="text-[var(--text-muted)]">•</span><span>{note}</span></li>
+                                                  ))}
+                                                </ul>
+                                              </div>
+                                            )}
+
+                                            {selectedSliceMissingDetails.length > 0 && (
+                                              <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">缺失信息</div>
+                                                <ul className="mt-2 space-y-2 text-[11px] leading-6 text-[var(--text-primary)]">
+                                                  {selectedSliceMissingDetails.map((detail) => (
+                                                    <li key={detail} className="flex gap-2"><span className="text-[var(--text-muted)]">•</span><span>{detail}</span></li>
+                                                  ))}
+                                                </ul>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+
                                         <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
-                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">镜头元数据</div>
+                                          <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-[var(--text-muted)]">{selectedSliceDetail.kind === 'merged' ? '段落元数据' : '镜头元数据'}</div>
                                           <div className="mt-4 space-y-3">
-                                            {[
-                                              { label: '镜头时长', value: selectedSliceShot.durationLabel },
-                                              { label: '转场方式', value: selectedSliceShot.transition },
-                                              { label: '运镜语言', value: selectedSliceShot.cameraLanguage },
-                                              { label: '情绪落点', value: selectedSliceShot.emotionAnchor },
-                                              { label: '声音设计', value: selectedSliceShot.soundDesign },
-                                              { label: '提示词聚焦', value: selectedSliceShot.promptFocus },
-                                            ].map((item) => (
+                                            {selectedSliceMetadataItems.map((item) => (
                                               <div key={item.label} className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
                                                 <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{item.label}</div>
                                                 <div className="mt-1 text-[11px] leading-5 text-[var(--text-primary)]">{item.value}</div>
                                               </div>
                                             ))}
                                           </div>
+                                          {selectedSliceReconstructionWarnings.length > 0 && (
+                                            <div className="mt-4 rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)] px-3 py-3">
+                                              <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">重建提示</div>
+                                              <ul className="mt-2 space-y-2 text-[11px] leading-6 text-[var(--text-primary)]">
+                                                {selectedSliceReconstructionWarnings.map((warning) => (
+                                                  <li key={warning} className="flex gap-2"><span className="text-[var(--text-muted)]">•</span><span>{warning}</span></li>
+                                                ))}
+                                              </ul>
+                                            </div>
+                                          )}
                                         </div>
 
                                         <div className="rounded-xl border border-[var(--border-primary)] bg-[var(--bg-sunken)] p-4">
@@ -2432,6 +4549,64 @@ const Dashboard: React.FC<Props> = ({ onOpenProject, onShowModelConfig }) => {
               />
             </div>
           </div>
+        </div>
+      )}
+
+      {showDashboardCharacterAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)]/70 p-6" onClick={() => setShowDashboardCharacterAddModal(false)}>
+          <div className="w-full max-w-md bg-[var(--bg-primary)] border border-[var(--border-primary)] p-6" onClick={(event) => event.stopPropagation()}>
+            <h3 className="text-sm font-bold text-[var(--text-primary)] uppercase tracking-widest mb-4">添加角色到全局角色库</h3>
+            <div className="space-y-3">
+              <input
+                value={newDashboardCharacterForm.name}
+                onChange={(event) => setNewDashboardCharacterForm((prev) => ({ ...prev, name: event.target.value }))}
+                placeholder="角色名称 *"
+                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--border-secondary)]"
+                autoFocus
+              />
+              <div className="flex gap-3">
+                <input
+                  value={newDashboardCharacterForm.gender}
+                  onChange={(event) => setNewDashboardCharacterForm((prev) => ({ ...prev, gender: event.target.value }))}
+                  placeholder="性别"
+                  className="flex-1 px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none"
+                />
+                <input
+                  value={newDashboardCharacterForm.age}
+                  onChange={(event) => setNewDashboardCharacterForm((prev) => ({ ...prev, age: event.target.value }))}
+                  placeholder="年龄"
+                  className="flex-1 px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none"
+                />
+              </div>
+              <textarea
+                value={newDashboardCharacterForm.personality}
+                onChange={(event) => setNewDashboardCharacterForm((prev) => ({ ...prev, personality: event.target.value }))}
+                placeholder="性格描述"
+                rows={2}
+                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none resize-none"
+              />
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={handleAddDashboardCharacter}
+                className="flex-1 py-2 bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] text-xs font-bold uppercase tracking-widest hover:bg-[var(--btn-primary-hover)]"
+              >
+                添加
+              </button>
+              <button
+                onClick={() => setShowDashboardCharacterAddModal(false)}
+                className="flex-1 py-2 border border-[var(--border-primary)] text-[var(--text-tertiary)] text-xs font-bold uppercase tracking-widest hover:text-[var(--text-primary)]"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dashboardCharacterPreviewImage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)]/90 p-6 cursor-pointer" onClick={() => setDashboardCharacterPreviewImage(null)}>
+          <img src={dashboardCharacterPreviewImage} alt="角色预览" className="max-w-[90vw] max-h-[90vh] object-contain" />
         </div>
       )}
 

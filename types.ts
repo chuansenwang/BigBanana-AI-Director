@@ -912,6 +912,7 @@ export type BenchmarkSliceStatus = 'idle' | 'running' | 'completed' | 'failed';
 export interface BenchmarkSliceRequestMeta {
   middleFrames?: number;
   enableSceneDetect?: boolean;
+  enableTurningPoints?: boolean;
 }
 
 export interface BenchmarkSliceManifestInput {
@@ -926,6 +927,46 @@ export interface BenchmarkSliceManifestSummary {
   ok_rows?: number;
   partial_rows?: number;
   failed_rows?: number;
+}
+
+export interface BenchmarkSlicePromptReconstruction {
+  status?: 'pending' | 'ok' | 'partial' | 'skipped' | 'failed';
+  confidence?: string | null;
+  prompt_language?: string;
+  combined_prompt?: string;
+  first_frame_prompt?: string;
+  middle_frame_prompt?: string;
+  last_frame_prompt?: string;
+  transition_summary?: string;
+  negative_prompt?: string;
+  continuity_notes?: string[];
+  missing_details?: string[];
+  warnings?: string[];
+}
+
+export interface BenchmarkSliceTurningPoint {
+  index?: number;
+  timestamp_seconds?: number;
+  scene_score?: number;
+  frame_path?: string;
+}
+
+export interface BenchmarkSliceTurningPointsEnrichment {
+  enabled?: boolean;
+  available?: boolean;
+  status?: 'ok' | 'failed' | 'unavailable' | 'config_error';
+  method?: string;
+  threshold?: number;
+  min_gap_seconds?: number;
+  max_points?: number;
+  point_count?: number;
+  reason?: string;
+  points?: BenchmarkSliceTurningPoint[];
+}
+
+export interface BenchmarkSliceManifestShotEnrichment {
+  turning_points?: BenchmarkSliceTurningPointsEnrichment;
+  [key: string]: unknown;
 }
 
 export interface BenchmarkSliceManifestShot {
@@ -945,6 +986,8 @@ export interface BenchmarkSliceManifestShot {
   error_code?: string | null;
   error_message?: string | null;
   source_row?: Record<string, unknown>;
+  enrichment?: BenchmarkSliceManifestShotEnrichment;
+  reconstruction?: BenchmarkSlicePromptReconstruction;
 }
 
 export interface BenchmarkSliceManifest {
@@ -967,6 +1010,7 @@ export interface BenchmarkSliceArtifact {
   outputDir?: string;
   clipsDir?: string;
   framesDir?: string;
+  keyframesDir?: string;
   manifest?: BenchmarkSliceManifest;
   errorMessage?: string;
   warnings?: string[];
@@ -982,6 +1026,7 @@ export interface BenchmarkVideo {
   status: 'draft' | 'analyzing' | 'completed' | 'failed';
   deconstructResult: BenchmarkShotResult[] | null;
   breakdownReport?: string;
+  adaptationReport?: string;
   metrics?: BenchmarkMetrics;
   sourceMeta?: BenchmarkSourceMeta;
   transcriptStatus?: BenchmarkTranscriptStatus;

@@ -740,15 +740,88 @@ export const importIndexedDBData = async (
 // Utilities
 // =============================================
 
-export const convertImageToBase64 = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    if (!file.type.startsWith('image/')) { reject(new Error('只支持图片文件')); return; }
-    if (file.size > 10 * 1024 * 1024) { reject(new Error('图片大小不能超过 10MB')); return; }
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error('图片读取失败'));
-    reader.readAsDataURL(file);
-  });
+const readFileAsDataUrl = (file: Blob): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result as string);
+  reader.onerror = () => reject(new Error('图片读取失败'));
+  reader.readAsDataURL(file);
+});
+
+const loadImageElement = (src: string): Promise<HTMLImageElement> => new Promise((resolve, reject) => {
+  const image = new Image();
+  image.onload = () => resolve(image);
+  image.onerror = () => reject(new Error('图片解析失败'));
+  image.src = src;
+});
+
+const canvasToBlob = (canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> => new Promise((resolve, reject) => {
+  canvas.toBlob((blob) => {
+    if (blob) {
+      resolve(blob);
+      return;
+    }
+    reject(new Error('图片压缩失败'));
+  }, type, quality);
+});
+
+const compressImageForStorage = async (file: File, targetMaxBytes = 4 * 1024 * 1024): Promise<string> => {
+  const sourceDataUrl = await readFileAsDataUrl(file);
+  const image = await loadImageElement(sourceDataUrl);
+
+  let width = image.naturalWidth || image.width;
+  let height = image.naturalHeight || image.height;
+  const maxDimension = 4096;
+  const longestEdge = Math.max(width, height);
+
+  if (longestEdge > maxDimension) {
+    const scale = maxDimension / longestEdge;
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('浏览器不支持图片压缩');
+  }
+
+  context.drawImage(image, 0, 0, width, height);
+
+  const qualities = [0.9, 0.82, 0.74, 0.66, 0.58, 0.5];
+  let compressedBlob: Blob | null = null;
+
+  for (const quality of qualities) {
+    const candidateBlob = await canvasToBlob(canvas, 'image/webp', quality);
+    compressedBlob = candidateBlob;
+    if (candidateBlob.size <= targetMaxBytes) {
+      break;
+    }
+  }
+
+  if (!compressedBlob) {
+    throw new Error('图片压缩失败');
+  }
+
+  if (compressedBlob.size > targetMaxBytes) {
+    throw new Error('图片过大，压缩后仍无法上传，请改用更小的图片');
+  }
+
+  return readFileAsDataUrl(compressedBlob);
+};
+
+export const convertImageToBase64 = async (file: File): Promise<string> => {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('只支持图片文件');
+  }
+
+  if (file.size <= 10 * 1024 * 1024) {
+    return readFileAsDataUrl(file);
+  }
+
+  return compressImageForStorage(file);
 };
 
 // =============================================

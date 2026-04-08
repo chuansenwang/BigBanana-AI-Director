@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Users, MapPin, Package, Upload, Trash2, RotateCcw, Save, Link2 } from 'lucide-react';
+import { Users, MapPin, Package, Upload, Trash2, RotateCcw, Save, Link2, X } from 'lucide-react';
 import { Character, Scene, Prop } from '../../types';
 
 export type LibraryAssetType = 'character' | 'scene' | 'prop';
@@ -61,6 +61,7 @@ const AssetLibraryEditorCard: React.FC<AssetLibraryEditorCardProps> = ({
   onPreviewImage,
 }) => {
   const [draft, setDraft] = useState<LibraryAsset>(asset);
+  const [isExpanded, setIsExpanded] = useState(false);
   const AssetIcon = getAssetIcon(type);
 
   useEffect(() => {
@@ -83,16 +84,171 @@ const AssetLibraryEditorCard: React.FC<AssetLibraryEditorCardProps> = ({
   const getValue = (field: string): string => ((draft as any)[field] ?? '').toString();
   const previewImage = (draft as any).referenceImage as string | undefined;
   const version = (draft as any).version || 1;
+  const isCharacterCard = type === 'character';
+
+  const detailEditor = (
+    <>
+      {type === 'character' && (
+        <>
+          <input
+            value={getValue('name')}
+            onChange={(e) => updateField('name', e.target.value)}
+            placeholder="角色名称"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              value={getValue('gender')}
+              onChange={(e) => updateField('gender', e.target.value)}
+              placeholder="性别"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+            />
+            <input
+              value={getValue('age')}
+              onChange={(e) => updateField('age', e.target.value)}
+              placeholder="年龄"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+            />
+          </div>
+          <textarea
+            value={getValue('personality')}
+            onChange={(e) => updateField('personality', e.target.value)}
+            rows={2}
+            placeholder="性格描述"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
+          />
+          <textarea
+            value={getValue('coreFeatures')}
+            onChange={(e) => updateField('coreFeatures', e.target.value)}
+            rows={2}
+            placeholder="核心外观特征（可选）"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
+          />
+        </>
+      )}
+
+      {type === 'scene' && (
+        <>
+          <input
+            value={getValue('location')}
+            onChange={(e) => updateField('location', e.target.value)}
+            placeholder="场景地点"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              value={getValue('time')}
+              onChange={(e) => updateField('time', e.target.value)}
+              placeholder="时间"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+            />
+            <input
+              value={getValue('atmosphere')}
+              onChange={(e) => updateField('atmosphere', e.target.value)}
+              placeholder="氛围"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+            />
+          </div>
+        </>
+      )}
+
+      {type === 'prop' && (
+        <>
+          <input
+            value={getValue('name')}
+            onChange={(e) => updateField('name', e.target.value)}
+            placeholder="道具名称"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+          />
+          <input
+            value={getValue('category')}
+            onChange={(e) => updateField('category', e.target.value)}
+            placeholder="道具分类"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
+          />
+          <textarea
+            value={getValue('description')}
+            onChange={(e) => updateField('description', e.target.value)}
+            rows={2}
+            placeholder="道具描述"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
+          />
+        </>
+      )}
+
+      <textarea
+        value={getValue('visualPrompt')}
+        onChange={(e) => updateField('visualPrompt', e.target.value)}
+        rows={4}
+        placeholder="视觉提示词"
+        className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-y"
+      />
+
+      <div className="flex gap-2">
+        <label className="flex-1 py-2 border border-[var(--border-primary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)] rounded text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-2 cursor-pointer transition-colors">
+          <Upload className="w-3.5 h-3.5" />
+          上传图片
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onUploadImage(file);
+              e.currentTarget.value = '';
+            }}
+          />
+        </label>
+        <button
+          onClick={() => setDraft(asset)}
+          disabled={!hasChanges}
+          className="px-3 py-2 border border-[var(--border-primary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="重置"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div className="flex gap-2 pt-1">
+        <button
+          onClick={() => onSave(draft)}
+          disabled={!hasChanges}
+          className="flex-1 py-2 bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:bg-[var(--btn-primary-hover)] rounded text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          <Save className="w-3.5 h-3.5" />
+          保存修改
+        </button>
+        <button
+          onClick={onDelete}
+          className="px-3 py-2 border border-[var(--error-border)] text-[var(--error-text)] hover:bg-[var(--error-bg)] rounded transition-colors"
+          title="删除"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </>
+  );
 
   return (
-    <div className="bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded-xl overflow-hidden hover:border-[var(--border-secondary)] transition-colors">
-      <div className="aspect-video bg-[var(--bg-elevated)] relative">
+    <>
+      <div
+        className={`bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded-xl overflow-hidden hover:border-[var(--border-secondary)] transition-colors ${isCharacterCard ? 'mx-auto w-full max-w-[168px] cursor-pointer' : ''}`}
+        onClick={isCharacterCard ? () => setIsExpanded(true) : undefined}
+      >
+        <div className={`${isCharacterCard ? 'aspect-[9/16]' : 'aspect-video'} bg-[var(--bg-elevated)] relative overflow-hidden`}>
         {previewImage ? (
           <img
             src={previewImage}
             alt={getAssetTitle(type, draft)}
-            className="w-full h-full object-cover cursor-pointer"
-            onClick={() => onPreviewImage(previewImage)}
+            className={`${isCharacterCard ? 'h-full w-full cursor-pointer bg-[var(--bg-elevated)] object-contain object-center p-3' : 'w-full h-full object-contain object-top cursor-pointer bg-[var(--bg-elevated)] p-2'}`}
+            onClick={(event) => {
+              if (isCharacterCard) {
+                event.stopPropagation();
+                setIsExpanded(true);
+                return;
+              }
+              onPreviewImage(previewImage);
+            }}
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center text-[var(--text-muted)]">
@@ -110,157 +266,78 @@ const AssetLibraryEditorCard: React.FC<AssetLibraryEditorCardProps> = ({
           </div>
         )}
       </div>
-
-      <div className="p-4 space-y-3">
-        <div>
-          <div className="text-sm font-bold text-[var(--text-primary)] line-clamp-1">
-            {getAssetTitle(type, draft)}
-          </div>
+      <div className="p-4">
+        <div className="text-sm font-bold text-[var(--text-primary)] line-clamp-1">
+          {getAssetTitle(type, draft)}
+        </div>
+        {!isCharacterCard && (
           <div className="text-[10px] text-[var(--text-muted)] font-mono mt-1 line-clamp-1">
             {getAssetSubtitle(type, draft)}
           </div>
-        </div>
-
-        {type === 'character' && (
-          <>
-            <input
-              value={getValue('name')}
-              onChange={(e) => updateField('name', e.target.value)}
-              placeholder="角色名称"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                value={getValue('gender')}
-                onChange={(e) => updateField('gender', e.target.value)}
-                placeholder="性别"
-                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-              />
-              <input
-                value={getValue('age')}
-                onChange={(e) => updateField('age', e.target.value)}
-                placeholder="年龄"
-                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-              />
-            </div>
-            <textarea
-              value={getValue('personality')}
-              onChange={(e) => updateField('personality', e.target.value)}
-              rows={2}
-              placeholder="性格描述"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
-            />
-            <textarea
-              value={getValue('coreFeatures')}
-              onChange={(e) => updateField('coreFeatures', e.target.value)}
-              rows={2}
-              placeholder="核心外观特征（可选）"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
-            />
-          </>
         )}
-
-        {type === 'scene' && (
-          <>
-            <input
-              value={getValue('location')}
-              onChange={(e) => updateField('location', e.target.value)}
-              placeholder="场景地点"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-            />
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                value={getValue('time')}
-                onChange={(e) => updateField('time', e.target.value)}
-                placeholder="时间"
-                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-              />
-              <input
-                value={getValue('atmosphere')}
-                onChange={(e) => updateField('atmosphere', e.target.value)}
-                placeholder="氛围"
-                className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-              />
-            </div>
-          </>
-        )}
-
-        {type === 'prop' && (
-          <>
-            <input
-              value={getValue('name')}
-              onChange={(e) => updateField('name', e.target.value)}
-              placeholder="道具名称"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-            />
-            <input
-              value={getValue('category')}
-              onChange={(e) => updateField('category', e.target.value)}
-              placeholder="道具分类"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)]"
-            />
-            <textarea
-              value={getValue('description')}
-              onChange={(e) => updateField('description', e.target.value)}
-              rows={2}
-              placeholder="道具描述"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-none"
-            />
-          </>
-        )}
-
-        <textarea
-          value={getValue('visualPrompt')}
-          onChange={(e) => updateField('visualPrompt', e.target.value)}
-          rows={4}
-          placeholder="视觉提示词"
-          className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-primary)] rounded text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--border-secondary)] resize-y"
-        />
-
-        <div className="flex gap-2">
-          <label className="flex-1 py-2 border border-[var(--border-primary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)] rounded text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-2 cursor-pointer transition-colors">
-            <Upload className="w-3.5 h-3.5" />
-            上传图片
-            <input
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) onUploadImage(file);
-                e.currentTarget.value = '';
-              }}
-            />
-          </label>
-          <button
-            onClick={() => setDraft(asset)}
-            disabled={!hasChanges}
-            className="px-3 py-2 border border-[var(--border-primary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--border-secondary)] rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            title="重置"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        <div className="flex gap-2 pt-1">
-          <button
-            onClick={() => onSave(draft)}
-            disabled={!hasChanges}
-            className="flex-1 py-2 bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:bg-[var(--btn-primary-hover)] rounded text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            <Save className="w-3.5 h-3.5" />
-            保存修改
-          </button>
-          <button
-            onClick={onDelete}
-            className="px-3 py-2 border border-[var(--error-border)] text-[var(--error-text)] hover:bg-[var(--error-bg)] rounded transition-colors"
-            title="删除"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
       </div>
     </div>
+
+      {isCharacterCard && isExpanded && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--bg-base)]/80 p-4 md:p-6" onClick={() => setIsExpanded(false)}>
+          <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--border-primary)] bg-[var(--bg-primary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-5 py-4 md:px-6">
+              <div>
+                <div className="text-lg font-bold text-[var(--text-primary)]">{getAssetTitle(type, draft)}</div>
+                <div className="mt-1 text-[10px] font-mono uppercase tracking-widest text-[var(--text-muted)]">
+                  点击图片可查看大图 · 详细信息与编辑
+                </div>
+              </div>
+              <button
+                onClick={() => setIsExpanded(false)}
+                className="rounded border border-[var(--border-primary)] p-2 text-[var(--text-tertiary)] transition-colors hover:border-[var(--border-secondary)] hover:text-[var(--text-primary)]"
+                title="关闭"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid gap-0 md:grid-cols-[minmax(320px,42%)_1fr]">
+              <div className="border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] md:border-b-0 md:border-r">
+                <div className="relative flex min-h-[360px] items-center justify-center p-4 md:min-h-[620px] md:p-6">
+                  {previewImage ? (
+                    <img
+                      src={previewImage}
+                      alt={getAssetTitle(type, draft)}
+                      className="max-h-[72vh] w-full cursor-zoom-in object-contain object-top"
+                      onClick={() => onPreviewImage(previewImage)}
+                    />
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center text-[var(--text-muted)]">
+                      <AssetIcon className="mb-3 h-12 w-12 opacity-30" />
+                      <span className="text-[10px] font-mono uppercase tracking-widest">{getTypeLabel(type)}</span>
+                    </div>
+                  )}
+
+                  <div className="absolute left-4 top-4 px-2 py-0.5 text-[9px] font-mono rounded bg-[var(--accent-bg)] text-[var(--accent-text)] uppercase tracking-widest">
+                    v{version}
+                  </div>
+                  {refCount > 0 && (
+                    <div className="absolute right-4 top-4 px-2 py-0.5 text-[9px] font-mono rounded bg-[var(--bg-base)]/80 text-[var(--text-tertiary)] flex items-center gap-1">
+                      <Link2 className="w-3 h-3" />
+                      {refCount} 集引用
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-5 md:p-6">
+                <div className="mb-4">
+                  <div className="text-sm font-bold text-[var(--text-primary)]">角色详情</div>
+                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">{getAssetSubtitle(type, draft)}</div>
+                </div>
+                <div className="space-y-3">{detailEditor}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
